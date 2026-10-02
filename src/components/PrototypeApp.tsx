@@ -363,7 +363,9 @@ export function PrototypeApp() {
     [view, setView] = useState<
       "dashboard" | "new" | "detail" | "queue" | "reports" | "settings"
     >("dashboard"),
-    [toast, setToast] = useState("");
+    [toast, setToast] = useState(""),
+    [databaseHydrated, setDatabaseHydrated] = useState(false),
+    [syncStatus, setSyncStatus] = useState<"loading" | "saving" | "synced" | "offline">("loading");
   const activeProfile = demoProfiles.find((profile) => profile.id === activeProfileId) ?? demoProfiles[0];
   const role = activeProfile.role;
   useEffect(() => {
@@ -391,12 +393,69 @@ export function PrototypeApp() {
           ...seed.filter((request) => !savedIds.has(request.id)),
         ]);
       } catch {}
+    const loadDatabaseState = async () => {
+      try {
+        const response = await fetch("/api/prototype/state", { cache: "no-store" });
+        if (!response.ok) throw new Error(`Database returned ${response.status}`);
+        const saved = await response.json() as null | { requests: Req[]; masterData: MasterData };
+        if (saved?.requests?.length) {
+          setRows(saved.requests);
+          setSelected(saved.requests[0].id);
+        }
+        if (saved?.masterData?.projects?.length && saved.masterData.accounts?.length && saved.masterData.payees?.length) {
+          setMasterData(saved.masterData);
+        }
+        setSyncStatus("synced");
+      } catch (error) {
+        console.error("Prototype database load failed", error);
+        setSyncStatus("offline");
+      } finally {
+        setDatabaseHydrated(true);
+      }
+    };
+    void loadDatabaseState();
   }, []);
   useEffect(
-    () => localStorage.setItem("iap-demo", JSON.stringify(rows)),
+    () => {
+      try { localStorage.setItem("iap-demo", JSON.stringify(rows)); } catch {}
+    },
     [rows],
   );
-  useEffect(() => localStorage.setItem("iap-master-data", JSON.stringify(masterData)), [masterData]);
+  useEffect(() => {
+    try { localStorage.setItem("iap-master-data", JSON.stringify(masterData)); } catch {}
+  }, [masterData]);
+  useEffect(() => {
+    if (!databaseHydrated) return;
+    const profile = demoProfiles.find((item) => item.id === activeProfileId);
+    if (profile?.role === "Auditor") {
+      setSyncStatus("synced");
+      return;
+    }
+    setSyncStatus("saving");
+    const timeout = window.setTimeout(async () => {
+      const databaseRows = rows.map((request) => ({
+        ...request,
+        documents: request.documents.map((document) =>
+          document.dataUrl && document.dataUrl.length > 1_900_000
+            ? { name: document.name, type: document.type }
+            : document,
+        ),
+      }));
+      try {
+        const response = await fetch("/api/prototype/state", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ profileId: activeProfileId, rows: databaseRows, masterData }),
+        });
+        if (!response.ok) throw new Error(`Database returned ${response.status}`);
+        setSyncStatus("synced");
+      } catch (error) {
+        console.error("Prototype database save failed", error);
+        setSyncStatus("offline");
+      }
+    }, 650);
+    return () => window.clearTimeout(timeout);
+  }, [activeProfileId, databaseHydrated, masterData, rows]);
   const current = rows.find((r) => r.id === selected),
     notify = (m: string) => {
       setToast(m);
@@ -464,6 +523,9 @@ export function PrototypeApp() {
             )}
           </nav>
           <div className="proto-tools">
+            <span className={`sync-indicator ${syncStatus}`} title="Production database status">
+              <i />{syncStatus === "loading" ? "Connecting" : syncStatus === "saving" ? "Saving" : syncStatus === "synced" ? "Database synced" : "Local fallback"}
+            </span>
             <button
               className="icon-button"
               title="Reset demo"

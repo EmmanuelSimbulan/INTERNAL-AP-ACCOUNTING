@@ -105,6 +105,30 @@
   align-items: center;
   gap: 10px;
 }
+.sync-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid rgba(28, 43, 68, .09);
+  border-radius: 999px;
+  color: #5d626b;
+  background: rgba(255, 255, 255, .72);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.sync-indicator i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #a1a1a6;
+  box-shadow: 0 0 0 3px rgba(161, 161, 166, .12);
+}
+.sync-indicator.synced i { background: #24a468; box-shadow: 0 0 0 3px rgba(36, 164, 104, .13); }
+.sync-indicator.saving i,
+.sync-indicator.loading i { background: #e29a24; box-shadow: 0 0 0 3px rgba(226, 154, 36, .13); }
+.sync-indicator.offline i { background: #d04747; box-shadow: 0 0 0 3px rgba(208, 71, 71, .13); }
 .role-control {
   height: 38px;
   display: flex;
@@ -2210,6 +2234,10 @@
     padding: 4px;
     border: 0;
     background: transparent;
+  }
+  .sync-indicator {
+    padding: 8px;
+    font-size: 0;
   }
   .proto-nav {
     overflow: auto;

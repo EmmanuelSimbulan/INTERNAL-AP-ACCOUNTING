@@ -747,3 +747,11 @@ model SystemSetting {
   updatedById String?
   updatedAt   DateTime @updatedAt
 }
+
+model PrototypeWorkspace {
+  id         String   @id @default("default")
+  requests   Json
+  masterData Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}

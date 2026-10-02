@@ -17,3 +17,6 @@ test-results/
 *.tsbuildinfo
 
 .vercel
+.env*
+.agents/
+skills-lock.json
