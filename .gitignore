@@ -1,0 +1,17 @@
+node_modules/
+.next/
+.env
+.env.local
+.tools/
+.npm-cache/
+node-*-win-x64.zip
+postgresql-*-win-x64.zip
+.pgdata/
+coverage/
+storage/
+output/
+tmp/
+playwright-report/
+test-results/
+*.log
+*.tsbuildinfo

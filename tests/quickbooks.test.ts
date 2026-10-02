@@ -1,0 +1,3 @@
+import { describe,expect,it } from "vitest";import { generateQuickBooksCsv,validateQuickBooksInput } from "@/lib/quickbooks";
+const input={requestNumber:"RFP-SVI-2026-000001",company:"SVI",payee:"Demo",date:"2026-09-30",currency:"PHP",total:"150.00",lines:[{account:"6100",projectCode:"IT",memo:"Software renewal",amount:"150.00"}]};
+describe("QuickBooks preparation",()=>{it("generates deterministic checked output",()=>{const a=generateQuickBooksCsv(input);const b=generateQuickBooksCsv(input);expect(a.checksum).toBe(b.checksum);expect(a.csv).toContain("RFP-SVI")});it("blocks missing mappings",()=>expect(validateQuickBooksInput({...input,lines:[{...input.lines[0],account:""}]})).toContain("Line 1: account mapping is required"))});

@@ -1,0 +1,2 @@
+import { expect,test } from "@playwright/test";
+test("requester sees the PDF-faithful request form",async({page})=>{await page.goto("/sign-in");await page.getByLabel("WORK EMAIL").fill("requester1@svi.demo");await page.getByLabel("PASSWORD").fill("DemoPass!2026");await page.getByRole("button",{name:"Sign in"}).click();await page.goto("/requests/new");await expect(page.getByRole("heading",{name:"REQUEST FOR PAYMENT FORM"})).toBeVisible();await expect(page.getByText("NATURE OF PAYMENT")).toBeVisible();await expect(page.getByText("REQUESTOR'S SIGNATURE")).toBeVisible()});
