@@ -635,6 +635,28 @@
   font-size: 12px;
   line-height: 1.55;
 }
+.validation-summary {
+  margin: -10px 0 22px;
+  padding: 16px 18px;
+  border: 1px solid rgba(196, 55, 55, 0.2);
+  border-radius: 14px;
+  color: #7f1d1d;
+  background: #fff7f7;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.validation-summary strong {
+  display: block;
+  margin-bottom: 5px;
+  color: #5f1515;
+}
+.validation-summary ul {
+  margin: 0 0 5px;
+  padding-left: 20px;
+}
+.validation-summary small {
+  color: #8d5555;
+}
 .toast {
   position: fixed;
   left: 50%;

@@ -14,6 +14,10 @@ import {
   patternExample,
 } from "@/lib/company-numbering";
 import { demoProfiles, type DemoRole as Role } from "@/lib/demo-profiles";
+import {
+  getPrototypeRequestErrors,
+  parsePrototypeAmount,
+} from "@/lib/prototype-validation";
 type Status =
   | "Draft"
   | "Pending Manager Approval"
@@ -341,7 +345,11 @@ const seed: Req[] = [
     ],
   },
 ];
-const total = (l: Line[]) => l.reduce((n, x) => n + (Number(x.amount) || 0), 0),
+const total = (l: Line[]) =>
+    l.reduce((sum, line) => {
+      const amount = parsePrototypeAmount(line.amount);
+      return sum + (Number.isFinite(amount) ? amount : 0);
+    }, 0),
   cash = (n: number, c: string) =>
     new Intl.NumberFormat("en-PH", { style: "currency", currency: c }).format(
       n,
@@ -826,6 +834,7 @@ function NewRequest({
     [other] = useState(""),
     [currency, setCurrency] = useState("PHP"),
     [docs, setDocs] = useState<Attachment[]>([]),
+    [validationErrors, setValidationErrors] = useState<string[]>([]),
     [lines, setLines] = useState<Line[]>([
       {
         project: projectCodes[0] ?? "",
@@ -856,17 +865,11 @@ function NewRequest({
       setDocs(attachments);
     },
     done = (submit: boolean) => {
-      if (
-        submit &&
-        (!payee ||
-          !lines.every(
-            (l) =>
-              l.project && l.particulars.length >= 10 && Number(l.amount) > 0,
-          ))
-      ) {
-        alert(
-          "Before submitting, complete the payee, payment type, particulars, and amount for every line. You can use Save draft at any time.",
-        );
+      const errors = submit
+        ? getPrototypeRequestErrors(payee, nature, lines)
+        : [];
+      setValidationErrors(errors);
+      if (errors.length) {
         return;
       }
       const id = String(Date.now());
@@ -1044,6 +1047,15 @@ function NewRequest({
           <input type="checkbox" defaultChecked /> I certify that this request
           is complete and accurate.
         </div>
+        {validationErrors.length > 0 && (
+          <div className="validation-summary" role="alert" aria-live="assertive">
+            <strong>Please review the following:</strong>
+            <ul>
+              {validationErrors.map((error) => <li key={error}>{error}</li>)}
+            </ul>
+            <small>Formatted amounts such as 1,500.00 are accepted.</small>
+          </div>
+        )}
         <div className="actions">
           <button className="button secondary" onClick={() => done(false)}>
             Save draft
@@ -1125,7 +1137,8 @@ function Details({
     setDraft((current) => ({ ...current, documents: [...current.documents, ...additions] }));
   };
   const saveEdits = (resubmit: boolean) => {
-    if (!draft.payee.trim() || !draft.lines.length || draft.lines.some((line) => !line.project || line.particulars.trim().length < 10 || Number(line.amount) <= 0)) { notify("Complete the payee and all line details before saving"); return; }
+    const validationErrors = getPrototypeRequestErrors(draft.payee, draft.nature, draft.lines);
+    if (validationErrors.length) { notify(validationErrors[0]); return; }
     if (operationalEditor && !editReason.trim()) { notify("Enter an edit reason for the audit timeline"); return; }
     const event = requesterRevision ? (resubmit ? "Requester revised fields and resubmitted" : "Requester saved revised draft") : `${role} edited request data · ${editReason.trim()}`;
     update(request.id, { ...draft, status: requesterRevision && resubmit ? "Pending Manager Approval" : request.status }, event);
