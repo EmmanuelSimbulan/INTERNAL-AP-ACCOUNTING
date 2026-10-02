@@ -1,9 +1,10 @@
-node_modules/
+.git/
 .next/
-.env
-.env.local
 .tools/
 .npm-cache/
+.env
+.env.local
+node_modules/
 node-*-win-x64.zip
 postgresql-*-win-x64.zip
 .pgdata/
@@ -15,5 +16,3 @@ playwright-report/
 test-results/
 *.log
 *.tsbuildinfo
-
-.vercel
