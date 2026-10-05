@@ -422,6 +422,10 @@ export function PrototypeApp() {
     [toast, setToast] = useState(""),
     [databaseHydrated, setDatabaseHydrated] = useState(false),
     [syncStatus, setSyncStatus] = useState<"loading" | "saving" | "synced" | "offline">("loading");
+  const serverUpdatedAtRef = useRef<string | null>(null);
+  const applyingRemoteStateRef = useRef(false);
+  const syncStatusRef = useRef(syncStatus);
+  syncStatusRef.current = syncStatus;
   const activeProfile = demoProfiles.find((profile) => profile.id === activeProfileId) ?? demoProfiles[0];
   const role = activeProfile.role;
   useEffect(() => {
@@ -453,7 +457,8 @@ export function PrototypeApp() {
       try {
         const response = await fetch("/api/prototype/state", { cache: "no-store" });
         if (!response.ok) throw new Error(`Database returned ${response.status}`);
-        const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData> };
+        const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData>; updatedAt?: string };
+        serverUpdatedAtRef.current = saved?.updatedAt ?? null;
         if (saved?.requests?.length) {
           setRows(saved.requests.map(normalizeRequestWorkflow));
           setSelected(saved.requests[0].id);
@@ -481,6 +486,10 @@ export function PrototypeApp() {
     try { localStorage.setItem("iap-master-data", JSON.stringify(masterData)); } catch {}
   }, [masterData]);
   useEffect(() => {
+    if (applyingRemoteStateRef.current) {
+      applyingRemoteStateRef.current = false;
+      return;
+    }
     if (!databaseHydrated) return;
     const profile = demoProfiles.find((item) => item.id === activeProfileId);
     if (profile?.role === "Auditor") {
@@ -504,6 +513,8 @@ export function PrototypeApp() {
           body: JSON.stringify({ profileId: activeProfileId, rows: databaseRows, masterData }),
         });
         if (!response.ok) throw new Error(`Database returned ${response.status}`);
+        const saved = await response.json() as { updatedAt?: string };
+        if (saved.updatedAt) serverUpdatedAtRef.current = saved.updatedAt;
         setSyncStatus("synced");
       } catch (error) {
         console.error("Prototype database save failed", error);
@@ -512,6 +523,37 @@ export function PrototypeApp() {
     }, 650);
     return () => window.clearTimeout(timeout);
   }, [activeProfileId, databaseHydrated, masterData, rows]);
+  useEffect(() => {
+    if (!databaseHydrated || syncStatus !== "synced") return;
+    let active = true;
+    let checking = false;
+    const refreshSharedState = async () => {
+      if (checking || syncStatusRef.current !== "synced") return;
+      checking = true;
+      try {
+        const response = await fetch("/api/prototype/state", { cache: "no-store" });
+        if (!response.ok) return;
+        const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData>; updatedAt?: string };
+        if (!active || !saved?.updatedAt || saved.updatedAt === serverUpdatedAtRef.current) return;
+        if (syncStatusRef.current !== "synced") return;
+        const remoteRows = (saved.requests ?? []).map(normalizeRequestWorkflow);
+        serverUpdatedAtRef.current = saved.updatedAt;
+        applyingRemoteStateRef.current = true;
+        setRows(remoteRows);
+        setSelected((current) => remoteRows.some((request) => request.id === current) ? current : remoteRows[0]?.id ?? "");
+        setMasterData(normalizeMasterData(saved.masterData ?? {}));
+      } catch (error) {
+        console.error("Prototype database refresh failed", error);
+      } finally {
+        checking = false;
+      }
+    };
+    const timer = window.setInterval(() => void refreshSharedState(), 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [databaseHydrated, syncStatus]);
   const current = rows.find((r) => r.id === selected),
     notify = (m: string) => {
       setToast(m);
