@@ -9,7 +9,8 @@ test("administrator can configure request master data", async ({ page }) => {
   await page.reload();
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Master Data Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Administration Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workflow by Nature of Payment" })).toBeVisible();
   await expect(page.locator(".master-card")).toHaveCount(3);
 
   await page.getByPlaceholder("Add project code").fill("TEST-PROJECT");
@@ -19,6 +20,20 @@ test("administrator can configure request master data", async ({ page }) => {
   await page.reload();
   await page.getByRole("button", { name: "New request", exact: true }).click();
   await expect(page.locator('select option[value="TEST-PROJECT"]')).toHaveCount(1);
+});
+
+test("administrator can configure a workflow by nature of payment", async ({ page }) => {
+  await page.goto("/prototype");
+  await page.evaluate(() => localStorage.setItem("iap-active-profile", "avery-admin"));
+  await page.reload();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByLabel("NATURE OF PAYMENT").selectOption("Consultancy Fee");
+  await page.getByText("Accounting review", { exact: true }).click();
+  await page.getByLabel("ACCOUNTING THRESHOLD").fill("100000");
+  await expect(page.getByText("Accounting Review ≥ 100000", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Drag stages and assign branching arrows" })).toBeVisible();
+  await expect(page.locator(".workflow-node")).toHaveCount(5);
+  await expect(page.locator(".workflow-edge")).toHaveCount(4);
 });
 
 test("settings are hidden from non-administrator profiles", async ({ page }) => {

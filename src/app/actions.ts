@@ -6,12 +6,12 @@ import { createHash } from "node:crypto";
 import { db } from "@/lib/db";
 import { requirePermission, requireRole, requireUser, canReadRequest } from "@/lib/access";
 import { canAccessCompany } from "@/lib/rbac";
-import { validatedRequest } from "@/lib/validation";
+import { validatedRequest, validateUploadBatch } from "@/lib/validation";
 import { assertTransition, invalidatesApproval, type Status } from "@/lib/workflow";
 import { generateRequestPdf } from "@/lib/pdf";
 import { LocalRepositoryAdapter } from "@/lib/storage";
 import { generateQuickBooksCsv } from "@/lib/quickbooks";
-import { validateUpload } from "@/lib/validation";
+import { approvalPlanSnapshot, approvalStatusForStage, initialApprovalStatus, postApprovalStatus, readApprovalPlanSnapshot, resolveApprovalPlan } from "@/lib/approval-config";
 
 const requesterText = "I certify that the information in this request is complete and accurate and that the supporting documents are authentic and relevant to the payment being requested.";
 const approverText = "I have reviewed this request and its supporting documents and approve it for further accounting processing.";
@@ -34,25 +34,28 @@ export async function createRequestAction(form: FormData) {
   const submit = form.get("intent") === "submit";
   if (submit && !attested) throw new Error("Requester attestation is required");
   if (submit && (await requiredDocumentCategories(input.natureOfPaymentCode)).length) throw new Error("Save the draft, upload the required supporting documents, then submit from Edit / resubmit");
+  const nature = await db.natureOfPayment.findUniqueOrThrow({ where: { code: input.natureOfPaymentCode } });
+  const approvalPlan = submit ? await resolveApprovalPlan(input.companyId, nature.id, input.calculatedTotal) : null;
   const result = await db.$transaction(async (tx) => {
     const sequence = await tx.numberSequence.upsert({ where: { companyId_kind_periodKey: { companyId: input.companyId, kind: "DRAFT", periodKey: new Date().getUTCFullYear().toString() } }, create: { companyId: input.companyId, kind: "DRAFT", prefix: "IAP", resetPeriod: "ANNUAL", periodKey: new Date().getUTCFullYear().toString(), nextValue: 2 }, update: { nextValue: { increment: 1 } } });
     const draftIdentifier = `IAP-${new Date().getUTCFullYear()}-${String(sequence.nextValue - 1).padStart(6, "0")}`;
-    const payment = await tx.natureOfPayment.findUniqueOrThrow({ where: { code: input.natureOfPaymentCode } });
+    const payment = nature;
     const request = await tx.request.create({ data: { draftIdentifier, companyId: input.companyId, requesterId: user.id, createdById: user.id, payeeId: input.payeeId, natureOfPaymentId: payment.id, paymentOtherText: input.paymentOtherText, requestDate: input.requestDate, currency: input.currency, totalAmount: input.calculatedTotal, conditionalData: input.conditionalData as object, status: "DRAFT", lines: { create: input.lines.map((line, position) => ({ position, projectCodeId: line.projectCodeId, accountId: line.accountId || null, particulars: line.particulars, amount: line.amount })) } } });
-    await tx.requestVersion.create({ data: { requestId: request.id, version: 1, reason: "Created", snapshot: { ...input, requesterName: user.name } as object } });
+    await tx.requestVersion.create({ data: { requestId: request.id, version: 1, reason: "Created", snapshot: { ...input, requesterName: user.name, approvalPlan: approvalPlan ? approvalPlanSnapshot(approvalPlan) : undefined } as object } });
     await tx.statusHistory.create({ data: { requestId: request.id, toStatus: "DRAFT", actorId: user.id, requestVersion: 1, reason: "Created" } });
     await audit(tx, { requestId: request.id, actorId: user.id, action: "REQUEST_CREATED", entityType: "Request", entityId: request.id, after: { draftIdentifier, total: input.calculatedTotal } });
     if (!submit) return request;
     const number = await tx.numberSequence.upsert({ where: { companyId_kind_periodKey: { companyId: input.companyId, kind: "REQUEST", periodKey: new Date().getUTCFullYear().toString() } }, create: { companyId: input.companyId, kind: "REQUEST", prefix: "RFP", resetPeriod: "ANNUAL", periodKey: new Date().getUTCFullYear().toString(), nextValue: 2 }, update: { nextValue: { increment: 1 } } });
     const company = await tx.company.findUniqueOrThrow({ where: { id: input.companyId } });
     const requestNumber = `RFP-${company.code}-${new Date().getUTCFullYear()}-${String(number.nextValue - 1).padStart(6, "0")}`;
-    const approver = await tx.user.findFirstOrThrow({ where: { active: true, roles: { some: { role: { code: "APPROVER" }, OR: [{ companyId: input.companyId }, { companyId: null }] } } } });
-    const stage = await tx.approvalStage.findFirstOrThrow({ where: { workflow: { companyId: input.companyId, active: true }, key: "MANAGER" } });
-    await tx.request.update({ where: { id: request.id }, data: { requestNumber, status: "PENDING_MANAGER_APPROVAL", submittedAt: new Date(), lockVersion: { increment: 1 } } });
+    const firstStage = approvalPlan?.stages[0];
+    const nextStatus = approvalPlan ? initialApprovalStatus(approvalPlan) : "PENDING_MANAGER_APPROVAL";
+    await tx.request.update({ where: { id: request.id }, data: { requestNumber, status: nextStatus, submittedAt: new Date(), lockVersion: { increment: 1 } } });
     await tx.requestAttestation.create({ data: { requestId: request.id, userId: user.id, type: "REQUESTER", text: requesterText, textVersion: "1.0", requestVersion: 1, sessionIdHash: createHash("sha256").update(`${user.id}:${Date.now()}`).digest("hex") } });
-    await tx.approvalAssignment.create({ data: { requestId: request.id, stageId: stage.id, approverId: approver.id, requestVersion: 1, dueAt: new Date(Date.now() + 48 * 60 * 60 * 1000) } });
-    await tx.statusHistory.create({ data: { requestId: request.id, fromStatus: "DRAFT", toStatus: "PENDING_MANAGER_APPROVAL", actorId: user.id, requestVersion: 1 } });
-    await audit(tx, { requestId: request.id, actorId: user.id, action: "REQUEST_SUBMITTED", entityType: "Request", entityId: request.id, after: { requestNumber, approverId: approver.id } });
+    let approverId: string | undefined;
+    if (firstStage) { const approver = await tx.user.findFirstOrThrow({ where: { active: true, id: { not: user.id }, roles: { some: { role: { code: firstStage.requiredRole }, OR: [{ companyId: input.companyId }, { companyId: null }] } } } }); approverId = approver.id; await tx.approvalAssignment.create({ data: { requestId: request.id, stageId: firstStage.id, approverId, requestVersion: 1, dueAt: new Date(Date.now() + approvalPlan!.slaHours * 60 * 60 * 1000) } }); }
+    await tx.statusHistory.create({ data: { requestId: request.id, fromStatus: "DRAFT", toStatus: nextStatus, actorId: user.id, requestVersion: 1 } });
+    await audit(tx, { requestId: request.id, actorId: user.id, action: "REQUEST_SUBMITTED", entityType: "Request", entityId: request.id, after: { requestNumber, approverId, approvalPlan: approvalPlan ? approvalPlanSnapshot(approvalPlan) : null } });
     return request;
   }, { isolationLevel: "Serializable" });
   revalidatePath("/requests"); redirect(`/requests/${result.id}`);
@@ -63,19 +66,22 @@ export async function updateDraftAction(form: FormData) {
   if (!canAccessCompany(user, input.companyId)) throw new Error("Company access denied");
   if (submit && !attested) throw new Error("Requester attestation is required");
   if (submit) { const required = await requiredDocumentCategories(input.natureOfPaymentCode); const allowedScan = process.env.MOCK_MALWARE_SCANNER === "true" ? ["CLEAN","PENDING"] as const : ["CLEAN"] as const; const attached = await db.supportingDocument.findMany({ where: { requestId, deletedAt: null, scanStatus: { in: [...allowedScan] } }, select: { category: true } }); const available = new Set(attached.map((doc) => doc.category)); const missing = required.filter((category) => !available.has(category)); if (missing.length) throw new Error(`Missing or unscanned required documents: ${missing.join(", ")}`); }
+  const nature = await db.natureOfPayment.findUniqueOrThrow({ where: { code: input.natureOfPaymentCode } });
+  const approvalPlan = submit ? await resolveApprovalPlan(input.companyId, nature.id, input.calculatedTotal) : null;
   await db.$transaction(async (tx) => {
     const existing = await tx.request.findUniqueOrThrow({ where: { id: requestId }, include: { lines: true } });
     if (existing.requesterId !== user.id && !user.roles.includes("ADMIN")) throw new Error("Only the requester may edit this draft");
     if (!["DRAFT","RETURNED_FOR_REVISION","RETURNED_BY_AP"].includes(existing.status)) throw new Error("This request is not editable");
     const nextVersion = existing.currentVersion + 1; let requestNumber = existing.requestNumber;
     if (submit && !requestNumber) { const company = await tx.company.findUniqueOrThrow({ where: { id: input.companyId } }); const sequence = await tx.numberSequence.upsert({ where: { companyId_kind_periodKey: { companyId: input.companyId, kind: "REQUEST", periodKey: new Date().getUTCFullYear().toString() } }, create: { companyId: input.companyId, kind: "REQUEST", prefix: "RFP", resetPeriod: "ANNUAL", periodKey: new Date().getUTCFullYear().toString(), nextValue: 2 }, update: { nextValue: { increment: 1 } } }); requestNumber = `RFP-${company.code}-${new Date().getUTCFullYear()}-${String(sequence.nextValue - 1).padStart(6, "0")}`; }
-    const payment = await tx.natureOfPayment.findUniqueOrThrow({ where: { code: input.natureOfPaymentCode } });
+    const payment = nature;
     await tx.requestLine.deleteMany({ where: { requestId } });
     await tx.approvalAssignment.updateMany({ where: { requestId, completedAt: null, invalidatedAt: null }, data: { invalidatedAt: new Date() } });
-    await tx.request.update({ where: { id: requestId }, data: { companyId: input.companyId, payeeId: input.payeeId, natureOfPaymentId: payment.id, paymentOtherText: input.paymentOtherText, requestDate: input.requestDate, currency: input.currency, totalAmount: input.calculatedTotal, conditionalData: input.conditionalData as object, currentVersion: nextVersion, lockVersion: { increment: 1 }, requestNumber, status: submit ? "PENDING_MANAGER_APPROVAL" : existing.status, submittedAt: submit ? new Date() : existing.submittedAt, lines: { create: input.lines.map((line, position) => ({ position, projectCodeId: line.projectCodeId, accountId: line.accountId || null, particulars: line.particulars, amount: line.amount })) } } });
-    await tx.requestVersion.create({ data: { requestId, version: nextVersion, reason: submit ? "Revised and resubmitted" : "Draft edited", snapshot: { ...input, requesterName: user.name } as object } });
+    const nextStatus = submit && approvalPlan ? initialApprovalStatus(approvalPlan) : existing.status;
+    await tx.request.update({ where: { id: requestId }, data: { companyId: input.companyId, payeeId: input.payeeId, natureOfPaymentId: payment.id, paymentOtherText: input.paymentOtherText, requestDate: input.requestDate, currency: input.currency, totalAmount: input.calculatedTotal, conditionalData: input.conditionalData as object, currentVersion: nextVersion, lockVersion: { increment: 1 }, requestNumber, status: nextStatus, submittedAt: submit ? new Date() : existing.submittedAt, lines: { create: input.lines.map((line, position) => ({ position, projectCodeId: line.projectCodeId, accountId: line.accountId || null, particulars: line.particulars, amount: line.amount })) } } });
+    await tx.requestVersion.create({ data: { requestId, version: nextVersion, reason: submit ? "Revised and resubmitted" : "Draft edited", snapshot: { ...input, requesterName: user.name, approvalPlan: approvalPlan ? approvalPlanSnapshot(approvalPlan) : undefined } as object } });
     await audit(tx, { requestId, actorId: user.id, action: submit ? "REQUEST_RESUBMITTED" : "DRAFT_UPDATED", entityType: "Request", entityId: requestId, before: { version: existing.currentVersion, total: existing.totalAmount.toString() }, after: { version: nextVersion, total: input.calculatedTotal } });
-    if (submit) { const stage = await tx.approvalStage.findFirstOrThrow({ where: { workflow: { companyId: input.companyId, active: true }, key: "MANAGER" } }); const approver = await tx.user.findFirstOrThrow({ where: { active: true, id: { not: existing.requesterId }, roles: { some: { role: { code: "APPROVER" }, OR: [{ companyId: input.companyId }, { companyId: null }] } } } }); await tx.requestAttestation.create({ data: { requestId, userId: user.id, type: "REQUESTER", text: requesterText, textVersion: "1.0", requestVersion: nextVersion, sessionIdHash: createHash("sha256").update(`${user.id}:${Date.now()}`).digest("hex") } }); await tx.approvalAssignment.create({ data: { requestId, stageId: stage.id, approverId: approver.id, requestVersion: nextVersion, dueAt: new Date(Date.now() + 48 * 60 * 60 * 1000) } }); await tx.statusHistory.create({ data: { requestId, fromStatus: existing.status, toStatus: "PENDING_MANAGER_APPROVAL", actorId: user.id, requestVersion: nextVersion, reason: "Version-aware resubmission" } }); }
+    if (submit && approvalPlan) { const firstStage = approvalPlan.stages[0]; await tx.requestAttestation.create({ data: { requestId, userId: user.id, type: "REQUESTER", text: requesterText, textVersion: "1.0", requestVersion: nextVersion, sessionIdHash: createHash("sha256").update(`${user.id}:${Date.now()}`).digest("hex") } }); if (firstStage) { const approver = await tx.user.findFirstOrThrow({ where: { active: true, id: { not: existing.requesterId }, roles: { some: { role: { code: firstStage.requiredRole }, OR: [{ companyId: input.companyId }, { companyId: null }] } } } }); await tx.approvalAssignment.create({ data: { requestId, stageId: firstStage.id, approverId: approver.id, requestVersion: nextVersion, dueAt: new Date(Date.now() + approvalPlan.slaHours * 60 * 60 * 1000) } }); } await tx.statusHistory.create({ data: { requestId, fromStatus: existing.status, toStatus: nextStatus, actorId: user.id, requestVersion: nextVersion, reason: "Version-aware resubmission" } }); }
   }, { isolationLevel: "Serializable" });
   revalidatePath(`/requests/${requestId}`); redirect(`/requests/${requestId}`);
 }
@@ -101,21 +107,31 @@ export async function adjustAccountingLineAction(form: FormData) {
 }
 
 export async function decisionAction(form: FormData) {
-  const user = await requireRole("APPROVER", "ADMIN");
+  const user = await requireRole("APPROVER", "AP_REVIEWER", "ADMIN");
   const requestId = String(form.get("requestId"));
   const decision = String(form.get("decision")) as "APPROVED" | "RETURNED" | "REJECTED";
   const comment = String(form.get("comment") ?? "");
   const attested = form.get("attested") === "true";
   if (decision === "APPROVED" && !attested) throw new Error("Approver attestation is required");
-  const to = decision === "APPROVED" ? "MANAGER_APPROVED" : decision === "RETURNED" ? "RETURNED_FOR_REVISION" : "REJECTED";
   await db.$transaction(async (tx) => {
-    const request = await tx.request.findUniqueOrThrow({ where: { id: requestId }, include: { assignments: { where: { approverId: user.id, completedAt: null, invalidatedAt: null } } } });
+    const request = await tx.request.findUniqueOrThrow({ where: { id: requestId }, include: { assignments: { where: { approverId: user.id, completedAt: null, invalidatedAt: null }, include: { stage: true } }, versions: { orderBy: { version: "desc" }, take: 1 } } });
     if (request.requesterId === user.id) throw new Error("Self-approval is prohibited");
     if (!request.assignments.length && !user.roles.includes("ADMIN")) throw new Error("This request is not assigned to you");
-    assertTransition(request.status as Status, to, user.roles, comment);
-    const assignment = request.assignments[0] ?? await tx.approvalAssignment.findFirstOrThrow({ where: { requestId, completedAt: null } });
+    const assignment = request.assignments[0] ?? await tx.approvalAssignment.findFirstOrThrow({ where: { requestId, completedAt: null }, include: { stage: true } });
+    if (!user.roles.includes("ADMIN") && !user.roles.includes(assignment.stage.requiredRole)) throw new Error("Your role cannot approve this workflow stage");
+    if (decision !== "APPROVED" && !comment.trim()) throw new Error("A comment is required");
+    const snapshotPlan = readApprovalPlanSnapshot(request.versions[0]?.snapshot);
+    let to: Status = decision === "RETURNED" ? "RETURNED_FOR_REVISION" : decision === "REJECTED" ? "REJECTED" : "MANAGER_APPROVED";
+    let nextStage: { id: string; requiredRole: typeof assignment.stage.requiredRole } | null = null;
+    if (decision === "APPROVED" && snapshotPlan) {
+      const currentIndex = snapshotPlan.stageKeys.indexOf(assignment.stage.key);
+      const nextKey = snapshotPlan.stageKeys[currentIndex + 1];
+      if (nextKey) { nextStage = await tx.approvalStage.findFirstOrThrow({ where: { workflowId: snapshotPlan.workflowId, key: nextKey } }); to = approvalStatusForStage(nextKey); }
+      else to = postApprovalStatus(snapshotPlan.requireApValidation);
+    }
     await tx.approvalDecision.create({ data: { assignmentId: assignment.id, requestId, approverId: user.id, decision, comment: comment || null, attestationText: decision === "APPROVED" ? approverText : null, attestationVersion: decision === "APPROVED" ? "1.0" : null, requestVersion: request.currentVersion } });
     await tx.approvalAssignment.update({ where: { id: assignment.id }, data: { completedAt: new Date() } });
+    if (decision === "APPROVED" && nextStage && snapshotPlan) { const approver = await tx.user.findFirstOrThrow({ where: { active: true, id: { not: request.requesterId }, roles: { some: { role: { code: nextStage.requiredRole }, OR: [{ companyId: request.companyId }, { companyId: null }] } } } }); await tx.approvalAssignment.create({ data: { requestId, stageId: nextStage.id, approverId: approver.id, assignedById: user.id, requestVersion: request.currentVersion, dueAt: new Date(Date.now() + snapshotPlan.slaHours * 60 * 60 * 1000) } }); }
     await tx.request.update({ where: { id: requestId }, data: { status: to } });
     await tx.statusHistory.create({ data: { requestId, fromStatus: request.status, toStatus: to, actorId: user.id, requestVersion: request.currentVersion, reason: comment || null } });
     await audit(tx, { requestId, actorId: user.id, action: `APPROVAL_${decision}`, entityType: "Request", entityId: requestId, metadata: { comment } });
@@ -163,19 +179,59 @@ export async function quickBooksAction(form: FormData) {
   revalidatePath(`/requests/${requestId}`);
 }
 
+export async function saveApprovalControlAction(form: FormData) {
+  const user = await requireRole("ADMIN");
+  const companyId = String(form.get("companyId"));
+  const natureOfPaymentId = String(form.get("natureOfPaymentId"));
+  const managerApproval = form.get("managerApproval") === "true";
+  const accountingReview = form.get("accountingReview") === "true";
+  const requireApValidation = form.get("requireApValidation") === "true";
+  const thresholdInput = String(form.get("accountingThreshold") ?? "").trim();
+  const accountingThreshold = accountingReview && thresholdInput ? thresholdInput : null;
+  const slaHours = Number(form.get("slaHours") ?? 48);
+  if (!Number.isInteger(slaHours) || slaHours < 1 || slaHours > 720) throw new Error("Approval SLA must be between 1 and 720 hours");
+  if (accountingThreshold && (!/^\d{1,15}(\.\d{1,4})?$/.test(accountingThreshold) || Number(accountingThreshold) <= 0)) throw new Error("Accounting threshold must be a positive amount");
+  const [company, nature] = await Promise.all([db.company.findUnique({ where: { id: companyId } }), db.natureOfPayment.findUnique({ where: { id: natureOfPaymentId } })]);
+  if (!company || !nature) throw new Error("Unknown company or nature of payment");
+
+  await db.$transaction(async (tx) => {
+    let workflow = await tx.approvalWorkflow.findFirst({ where: { companyId, active: true }, include: { rules: true } });
+    if (!workflow) workflow = await tx.approvalWorkflow.create({ data: { companyId, name: `${company.name} Approval Workflow` }, include: { rules: true } });
+    await tx.approvalStage.upsert({ where: { workflowId_key: { workflowId: workflow.id, key: "MANAGER" } }, update: { name: "Manager Approval", order: 1, mode: "SEQUENTIAL", requiredRole: "APPROVER" }, create: { workflowId: workflow.id, key: "MANAGER", name: "Manager Approval", order: 1, mode: "SEQUENTIAL", requiredRole: "APPROVER" } });
+    await tx.approvalStage.upsert({ where: { workflowId_key: { workflowId: workflow.id, key: "ACCOUNTING" } }, update: { name: "Accounting Review", order: 2, mode: "SEQUENTIAL", requiredRole: "AP_REVIEWER" }, create: { workflowId: workflow.id, key: "ACCOUNTING", name: "Accounting Review", order: 2, mode: "SEQUENTIAL", requiredRole: "AP_REVIEWER" } });
+    const existing = workflow.rules.find((rule) => { const conditions = rule.conditions as { natureOfPaymentId?: string } | null; return conditions?.natureOfPaymentId === natureOfPaymentId; });
+    const conditions = { natureOfPaymentId, requireApValidation, accountingThreshold, slaHours };
+    const stageKeys = [managerApproval ? "MANAGER" : null, accountingReview ? "ACCOUNTING" : null].filter((key): key is string => Boolean(key));
+    const rule = existing
+      ? await tx.approvalRule.update({ where: { id: existing.id }, data: { conditions, stageKeys, active: true } })
+      : await tx.approvalRule.create({ data: { workflowId: workflow.id, priority: 1000 + nature.sortOrder, conditions, stageKeys, active: true } });
+    await audit(tx, { actorId: user.id, action: "APPROVAL_CONTROL_UPDATED", entityType: "ApprovalRule", entityId: rule.id, after: { companyId, natureOfPaymentId, managerApproval, accountingReview, requireApValidation, accountingThreshold, slaHours } });
+  });
+  revalidatePath("/admin");
+}
+
 export async function uploadDocumentAction(form: FormData) {
-  const user = await requirePermission("document.upload"); const requestId = String(form.get("requestId")); const category = String(form.get("category") ?? "OTHER"); const file = form.get("file");
-  if (!(file instanceof File)) throw new Error("Select a file");
-  validateUpload(file, Number(process.env.MAX_UPLOAD_BYTES ?? 10 * 1024 * 1024));
+  const user = await requirePermission("document.upload"); const requestId = String(form.get("requestId")); const category = String(form.get("category") ?? "OTHER");
+  const selected = form.getAll("files");
+  // Keep accepting the original field name so older clients can still upload one document.
+  if (!selected.length) { const legacyFile = form.get("file"); if (legacyFile) selected.push(legacyFile); }
+  const files = selected.filter((entry): entry is File => entry instanceof File && entry.size > 0);
+  validateUploadBatch(files, Number(process.env.MAX_UPLOAD_BYTES ?? 10 * 1024 * 1024), Number(process.env.MAX_UPLOAD_FILES ?? 20));
   const request = await db.request.findUniqueOrThrow({ where: { id: requestId }, include: { assignments: true } });
   if (!canReadRequest(user, request)) throw new Error("Access denied");
-  const bytes = new Uint8Array(await file.arrayBuffer()); const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const duplicate = await db.supportingDocument.findFirst({ where: { requestId, sha256, deletedAt: null } }); if (duplicate) throw new Error("This document is already attached");
-  const stored = await new LocalRepositoryAdapter().put({ requestId, category: "supporting", originalFilename: file.name, bytes, expectedHash: sha256 });
+  const uploads = await Promise.all(files.map(async (file) => { const bytes = new Uint8Array(await file.arrayBuffer()); return { file, bytes, sha256: createHash("sha256").update(bytes).digest("hex") }; }));
+  const hashes = uploads.map((upload) => upload.sha256);
+  if (new Set(hashes).size !== hashes.length) throw new Error("The selected files include duplicate documents");
+  const duplicate = await db.supportingDocument.findFirst({ where: { requestId, sha256: { in: hashes }, deletedAt: null } });
+  if (duplicate) throw new Error(`A selected document is already attached: ${duplicate.originalFilename}`);
+  const repository = new LocalRepositoryAdapter();
+  const storedUploads = await Promise.all(uploads.map(async (upload) => ({ ...upload, stored: await repository.put({ requestId, category: "supporting", originalFilename: upload.file.name, bytes: upload.bytes, expectedHash: upload.sha256 }) })));
   await db.$transaction(async (tx) => {
-    const doc = await tx.supportingDocument.create({ data: { requestId, category, originalFilename: file.name, safeFilename: stored.storageKey.split("/").at(-1)!, storageKey: stored.storageKey, mimeType: file.type, sizeBytes: file.size, sha256, scanStatus: process.env.MOCK_MALWARE_SCANNER === "true" ? "CLEAN" : "PENDING", uploadedById: user.id } });
-    await tx.documentVersion.create({ data: { documentId: doc.id, version: 1, storageKey: stored.storageKey, sha256, sizeBytes: file.size } });
-    await audit(tx, { requestId, actorId: user.id, action: "DOCUMENT_UPLOADED", entityType: "SupportingDocument", entityId: doc.id, after: { category, filename: file.name, sha256 } });
+    for (const { file, sha256, stored } of storedUploads) {
+      const doc = await tx.supportingDocument.create({ data: { requestId, category, originalFilename: file.name, safeFilename: stored.storageKey.split("/").at(-1)!, storageKey: stored.storageKey, mimeType: file.type, sizeBytes: file.size, sha256, scanStatus: process.env.MOCK_MALWARE_SCANNER === "true" ? "CLEAN" : "PENDING", uploadedById: user.id } });
+      await tx.documentVersion.create({ data: { documentId: doc.id, version: 1, storageKey: stored.storageKey, sha256, sizeBytes: file.size } });
+      await audit(tx, { requestId, actorId: user.id, action: "DOCUMENT_UPLOADED", entityType: "SupportingDocument", entityId: doc.id, after: { category, filename: file.name, sha256 } });
+    }
   });
   revalidatePath(`/requests/${requestId}`);
 }

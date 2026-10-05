@@ -1,8 +1,0 @@
-import { requireUser } from "@/lib/access";
-import { db } from "@/lib/db";
-
-export default async function Profile() {
-  const session = await requireUser();
-  const user = await db.user.findUniqueOrThrow({ where: { id: session.id }, include: { department: true, roles: { include: { role: true } }, delegationsFrom: { where: { active: true }, include: { delegate: true } } } });
-  return <><span className="eyebrow">Identity & authority</span><h1>Profile and Access</h1><div className="grid grid-2 section"><section className="card"><h2>{user.fullName}</h2><p>{user.email}</p><p className="muted">{user.department?.name ?? "No department"}</p><div className="actions">{user.roles.map((assignment) => <span key={assignment.roleId} className="badge">{assignment.role.name}</span>)}</div></section><section className="card"><h2>Effective permissions</h2><div className="actions">{session.permissions.map((permission) => <span key={permission} className="badge">{permission}</span>)}</div><p className="fine">Permissions come from database role grants and are enforced again on server actions and protected downloads.</p></section></div><section className="card section"><h2>Active delegations</h2>{user.delegationsFrom.length ? user.delegationsFrom.map((delegation) => <p key={delegation.id}>{delegation.delegate.fullName} · {delegation.startsAt.toLocaleDateString()}–{delegation.endsAt.toLocaleDateString()}</p>) : <p className="muted">No active delegations.</p>}<p className="fine">Delegation creation is limited to authorized approvers and administrators and remains version-aware.</p></section></>;
-}

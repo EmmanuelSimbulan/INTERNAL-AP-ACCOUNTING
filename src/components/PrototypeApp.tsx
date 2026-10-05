@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { downloadInvoicePdf } from "@/lib/prototype-invoice-pdf";
 import {
@@ -9,18 +9,18 @@ import {
 import {
   companyNumberingRules,
   generateInvoiceNumber,
-  generateRequestNumber,
   getCompanyNumberingRule,
-  patternExample,
 } from "@/lib/company-numbering";
 import { demoProfiles, type DemoRole as Role } from "@/lib/demo-profiles";
 import {
   getPrototypeRequestErrors,
   parsePrototypeAmount,
 } from "@/lib/prototype-validation";
+import { clonePrototypeDiagram, normalizePrototypeDiagram, resolvePrototypeApproval, tracePrototypeDiagram, type PrototypeBranchCondition, type PrototypeWorkflowControl as WorkflowControl, type PrototypeWorkflowDiagram, type PrototypeWorkflowNodeId, type PrototypeWorkflowNodeRole } from "@/lib/prototype-workflow";
 type Status =
   | "Draft"
   | "Pending Manager Approval"
+  | "Pending Accounting Review"
   | "Returned for Revision"
   | "Rejected"
   | "Manager Approved"
@@ -41,6 +41,17 @@ type Attachment = {
   type: string;
   dataUrl?: string;
 };
+type StatusCheckpoint = {
+  status: Status;
+  approvalPlan?: Array<"Manager Approval" | "Accounting Review" | "AP Validation">;
+  approvalStep?: number;
+  requireApValidation?: boolean;
+  qbId?: string;
+  paymentRef?: string;
+  reconciliationRef?: string;
+  event: string;
+};
+type ApprovalPlanStep = "Manager Approval" | "Accounting Review" | "AP Validation";
 type Req = {
   id: string;
   number: string;
@@ -59,8 +70,38 @@ type Req = {
   qbId?: string;
   paymentRef?: string;
   reconciliationRef?: string;
+  approvalPlan?: ApprovalPlanStep[];
+  approvalStep?: number;
+  requireApValidation?: boolean;
+  statusHistory?: StatusCheckpoint[];
 };
-const types = [
+const standardRequestApprovalPlan: ApprovalPlanStep[] = ["Manager Approval", "AP Validation", "Accounting Review"];
+function requestApprovalPlan(request: Pick<Req, "approvalPlan" | "requireApValidation" | "status">): ApprovalPlanStep[] {
+  const plan = [...(request.approvalPlan ?? (request.status === "Draft" ? [] : standardRequestApprovalPlan))];
+  if (request.requireApValidation !== false && !plan.includes("AP Validation")) {
+    const accountingIndex = plan.indexOf("Accounting Review");
+    plan.splice(accountingIndex < 0 ? plan.length : accountingIndex, 0, "AP Validation");
+  }
+  return plan;
+}
+function requestApprovalStepIndex(request: Pick<Req, "approvalPlan" | "requireApValidation" | "status" | "approvalStep">, plan: ApprovalPlanStep[]) {
+  const migratedStageInserted = Boolean(request.approvalPlan && plan.length > request.approvalPlan.length);
+  if (request.approvalStep !== undefined && !migratedStageInserted) return request.approvalStep;
+  const currentStage = request.status === "Pending Manager Approval" ? "Manager Approval" : request.status === "Pending Accounting Review" ? "Accounting Review" : request.status === "Pending AP Validation" || request.status === "Manager Approved" ? "AP Validation" : undefined;
+  return currentStage ? Math.max(0, plan.indexOf(currentStage)) : 0;
+}
+function normalizeRequestWorkflow(request: Req): Req {
+  if (request.status === "Draft") return request;
+  const plan = requestApprovalPlan(request);
+  const needsApCatchup = request.status === "Pending Accounting Review" && request.requireApValidation !== false && !request.approvalPlan?.includes("AP Validation");
+  return {
+    ...request,
+    approvalPlan: plan,
+    approvalStep: needsApCatchup ? plan.indexOf("AP Validation") : requestApprovalStepIndex(request, plan),
+    ...(needsApCatchup ? { status: "Pending AP Validation" as const, timeline: [...request.timeline, "Workflow updated: sent to AP Processor for validation before Accounting review"] } : {}),
+  };
+}
+const defaultNatureOfPayments = [
   "Cash Advance",
   "Taxes and Licenses Remittance (BIR, CDC, City Treasurer of Pasig, etc.)",
   "Fund Replenishment (PCF, Revolving, etc.)",
@@ -98,12 +139,27 @@ const projects = [
     "Office Supplies",
     "Professional Fees",
   ];
-type MasterData = { projects: string[]; accounts: string[]; payees: string[] };
+type MasterData = { projects: string[]; accounts: string[]; payees: string[]; natureOfPayments: string[]; workflows: Record<string, WorkflowControl> };
+const defaultWorkflow: WorkflowControl = { managerApproval: true, accountingReview: true, accountingThreshold: "", requireApValidation: true, slaHours: 48, diagram: clonePrototypeDiagram() };
+const defaultWorkflows = Object.fromEntries(defaultNatureOfPayments.map((nature) => [nature, { ...defaultWorkflow, diagram: clonePrototypeDiagram() }]));
 const defaultMasterData: MasterData = {
   projects: [...projects],
   accounts: [...accounts],
   payees: ["Northstar Demo Supplies", "Bluebird Sample Consulting", "Alex Rivera", "Demo Payroll Clearing", "Sample Mobile Recipient", "Atlas Demo Services"],
+  natureOfPayments: defaultNatureOfPayments,
+  workflows: defaultWorkflows,
 };
+function usesLegacyDefaultRoute(diagram?: PrototypeWorkflowDiagram) {
+  if (!diagram || diagram.nodes.length !== 5 || diagram.edges.length !== 4) return false;
+  const routeEdges = new Set(diagram.edges.map((edge) => `${edge.from}>${edge.to}`));
+  return diagram.edges.every((edge) => edge.condition === "ALWAYS") && ["request>manager", "manager>accounting", "accounting>ap", "ap>quickbooks"].every((edge) => routeEdges.has(edge));
+}
+function normalizeMasterData(value: Partial<MasterData>): MasterData {
+  const savedWorkflows = value.workflows ?? {};
+  const natureOfPayments = value.natureOfPayments?.length ? value.natureOfPayments : defaultNatureOfPayments;
+  const workflows = Object.fromEntries(natureOfPayments.map((nature) => { const saved = savedWorkflows[nature]; const migrateDefault = usesLegacyDefaultRoute(saved?.diagram); return [nature, { ...defaultWorkflow, ...(saved ?? {}), ...(migrateDefault ? { accountingReview: true } : {}), diagram: migrateDefault ? clonePrototypeDiagram() : normalizePrototypeDiagram(saved?.diagram) }]; }));
+  return { projects: value.projects ?? defaultMasterData.projects, accounts: value.accounts ?? defaultMasterData.accounts, payees: value.payees ?? defaultMasterData.payees, natureOfPayments, workflows };
+}
 const companies = companyNumberingRules.map((rule) => rule.name);
 const demoImagePreview = (title: string) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700"><rect width="1000" height="700" fill="#f5f5f7"/><rect x="90" y="70" width="820" height="560" rx="24" fill="white" stroke="#d9d9de"/><text x="140" y="155" font-family="Arial" font-size="24" font-weight="700" fill="#1d1d1f">SVI Supporting Document</text><text x="140" y="210" font-family="Arial" font-size="18" fill="#6e6e73">${title}</text><path d="M140 275h720M140 330h520M140 385h650M140 440h430" stroke="#d2d2d7" stroke-width="12" stroke-linecap="round"/><circle cx="765" cy="505" r="62" fill="#e8f2ff"/><path d="m735 505 22 22 40-48" fill="none" stroke="#0071e3" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/><text x="140" y="560" font-family="Arial" font-size="16" fill="#86868b">Preview generated for workflow simulation</text></svg>`)}`;
 const seed: Req[] = [
@@ -358,7 +414,7 @@ export function PrototypeApp() {
   const [activeProfileId, setActiveProfileId] = useState(demoProfiles[0].id),
     [profileMenuOpen, setProfileMenuOpen] = useState(false),
     [masterData, setMasterData] = useState<MasterData>(defaultMasterData),
-    [rows, setRows] = useState<Req[]>(seed),
+    [rows, setRows] = useState<Req[]>(seed.map(normalizeRequestWorkflow)),
     [selected, setSelected] = useState("1"),
     [view, setView] = useState<
       "dashboard" | "new" | "detail" | "queue" | "reports" | "settings"
@@ -372,14 +428,14 @@ export function PrototypeApp() {
     const savedProfile = localStorage.getItem("iap-active-profile");
     if (savedProfile && demoProfiles.some((profile) => profile.id === savedProfile)) setActiveProfileId(savedProfile);
     const savedMasters = localStorage.getItem("iap-master-data");
-    if (savedMasters) try { const parsed = JSON.parse(savedMasters) as MasterData; if (parsed.projects?.length && parsed.accounts?.length && parsed.payees?.length) setMasterData(parsed); } catch {}
+    if (savedMasters) try { const parsed = JSON.parse(savedMasters) as Partial<MasterData>; if (parsed.projects?.length && parsed.accounts?.length && parsed.payees?.length) setMasterData(normalizeMasterData(parsed)); } catch {}
     const s = localStorage.getItem("iap-demo");
     if (s)
       try {
         const saved = JSON.parse(s) as Array<
           Omit<Req, "documents"> & { documents: Array<Attachment | string> }
         >;
-        const normalized = saved.map((request) => ({
+        const normalized = saved.map((request) => normalizeRequestWorkflow({
           ...request,
           documents: request.documents.map((document) =>
             typeof document === "string"
@@ -397,13 +453,13 @@ export function PrototypeApp() {
       try {
         const response = await fetch("/api/prototype/state", { cache: "no-store" });
         if (!response.ok) throw new Error(`Database returned ${response.status}`);
-        const saved = await response.json() as null | { requests: Req[]; masterData: MasterData };
+        const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData> };
         if (saved?.requests?.length) {
-          setRows(saved.requests);
+          setRows(saved.requests.map(normalizeRequestWorkflow));
           setSelected(saved.requests[0].id);
         }
         if (saved?.masterData?.projects?.length && saved.masterData.accounts?.length && saved.masterData.payees?.length) {
-          setMasterData(saved.masterData);
+          setMasterData(normalizeMasterData(saved.masterData));
         }
         setSyncStatus("synced");
       } catch (error) {
@@ -466,11 +522,17 @@ export function PrototypeApp() {
       setView("detail");
     },
     update = (id: string, c: Partial<Req>, event: string) =>
-      setRows((a) =>
-        a.map((r) =>
-          r.id === id ? { ...r, ...c, timeline: [...r.timeline, event] } : r,
-        ),
-      );
+      setRows((a) => a.map((r) => {
+        if (r.id !== id) return r;
+        const statusAction = (c.status !== undefined && c.status !== r.status) || (c.approvalStep !== undefined && c.approvalStep !== r.approvalStep);
+        const checkpoint: StatusCheckpoint = { status: r.status, approvalPlan: r.approvalPlan, approvalStep: r.approvalStep, requireApValidation: r.requireApValidation, qbId: r.qbId, paymentRef: r.paymentRef, reconciliationRef: r.reconciliationRef, event };
+        return { ...r, ...c, ...(statusAction ? { statusHistory: [...(r.statusHistory ?? []), checkpoint].slice(-25) } : {}), timeline: [...r.timeline, event] };
+      }));
+  const undoStatusAction = (id: string) => setRows((currentRows) => currentRows.map((r) => {
+    if (r.id !== id || !r.statusHistory?.length) return r;
+    const checkpoint = r.statusHistory[r.statusHistory.length - 1];
+    return { ...r, status: checkpoint.status, approvalPlan: checkpoint.approvalPlan, approvalStep: checkpoint.approvalStep, requireApValidation: checkpoint.requireApValidation, qbId: checkpoint.qbId, paymentRef: checkpoint.paymentRef, reconciliationRef: checkpoint.reconciliationRef, statusHistory: r.statusHistory.slice(0, -1), timeline: [...r.timeline, `Undid status action: ${checkpoint.event}; restored ${checkpoint.status}`] };
+  }));
   return (
     <div className="prototype">
       <header className="proto-top">
@@ -578,6 +640,8 @@ export function PrototypeApp() {
               projectCodes={masterData.projects}
               accountOptions={masterData.accounts}
               payeeOptions={masterData.payees}
+              natureOptions={masterData.natureOfPayments}
+              workflows={masterData.workflows}
               save={(r) => {
                 setRows((a) => [r, ...a]);
                 setSelected(r.id);
@@ -591,10 +655,13 @@ export function PrototypeApp() {
               role={role}
               request={current}
               update={update}
+              undoStatusAction={undoStatusAction}
               notify={notify}
               projectCodes={masterData.projects}
               accountOptions={masterData.accounts}
               payeeOptions={masterData.payees}
+              natureOptions={masterData.natureOfPayments}
+              workflows={masterData.workflows}
             />
           )}{" "}
           {view === "reports" && <Reports rows={rows} />}
@@ -690,6 +757,13 @@ function Dashboard({
                 <h2>Pipeline</h2>
               </div>
               <span className="live-dot" aria-label="Live" />
+            </div>
+            <div className="workflow-row">
+              <span>
+                <i className="step-dot purple" />
+                Accounting review
+              </span>
+              <strong>{rows.filter((request) => request.status === "Pending Accounting Review").length}</strong>
             </div>
             <div className="workflow-row">
               <span>
@@ -884,18 +958,27 @@ function NewRequest({
   projectCodes,
   accountOptions,
   payeeOptions,
+  natureOptions,
+  workflows,
 }: {
   save: (r: Req) => void;
   projectCodes: string[];
   accountOptions: string[];
   payeeOptions: string[];
+  natureOptions: string[];
+  workflows: MasterData["workflows"];
 }) {
   const [company, setCompany] = useState("SVI TECHNOLOGIES INC"),
+    [requestDate, setRequestDate] = useState(new Date().toISOString().slice(0, 10)),
     [payee, setPayee] = useState(""),
-    [nature, setNature] = useState("Reimbursement (includes Notarization)"),
+    [nature, setNature] = useState(natureOptions[0] ?? ""),
     [other] = useState(""),
     [currency, setCurrency] = useState("PHP"),
     [docs, setDocs] = useState<Attachment[]>([]),
+    [isDraggingDocuments, setIsDraggingDocuments] = useState(false),
+    [documentError, setDocumentError] = useState(""),
+    [predictedInvoiceNumber, setPredictedInvoiceNumber] = useState("Loading…"),
+    [saving, setSaving] = useState(false),
     [validationErrors, setValidationErrors] = useState<string[]>([]),
     [lines, setLines] = useState<Line[]>([
       {
@@ -906,12 +989,51 @@ function NewRequest({
       },
     ]);
   const numberingRule = getCompanyNumberingRule(company);
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const response = await fetch("/api/prototype/numbering", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({ company, date: requestDate, action: "preview" }),
+        });
+        const result = await response.json();
+        if (active && response.ok) setPredictedInvoiceNumber(result.invoiceNumber);
+        else if (active) setPredictedInvoiceNumber("Unavailable");
+      } catch {
+        if (active) setPredictedInvoiceNumber("Unavailable");
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 3000);
+    const onFocus = () => void refresh();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [company, requestDate]);
   const change = (i: number, k: keyof Line, v: string) =>
       setLines((a) => a.map((l, n) => (n === i ? { ...l, [k]: v } : l))),
     readDocuments = async (files: FileList | null) => {
       const selectedFiles = Array.from(files ?? []);
+      if (!selectedFiles.length) return;
+      const availableSlots = Math.max(0, 30 - docs.length);
+      if (!availableSlots) {
+        setDocumentError("You can attach up to 30 supporting documents.");
+        return;
+      }
+      const filesToAdd = selectedFiles.slice(0, availableSlots);
+      setDocumentError(
+        selectedFiles.length > availableSlots
+          ? `Only ${availableSlots} more document${availableSlots === 1 ? "" : "s"} can be added (30 max).`
+          : "",
+      );
       const attachments = await Promise.all(
-        selectedFiles.map(async (file): Promise<Attachment> => {
+        filesToAdd.map(async (file): Promise<Attachment> => {
           const canPreview =
             file.type.startsWith("image/") || file.type === "application/pdf";
           if (!canPreview) return { name: file.name, type: file.type };
@@ -924,9 +1046,9 @@ function NewRequest({
           return { name: file.name, type: file.type, dataUrl };
         }),
       );
-      setDocs(attachments);
+      setDocs((current) => [...current, ...attachments]);
     },
-    done = (submit: boolean) => {
+    done = async (submit: boolean) => {
       const errors = submit
         ? getPrototypeRequestErrors(payee, nature, lines)
         : [];
@@ -934,12 +1056,23 @@ function NewRequest({
       if (errors.length) {
         return;
       }
-      const id = String(Date.now());
-      const requestDate = new Date().toISOString().slice(0, 10);
-      save({
+      if (saving) return;
+      setSaving(true);
+      try {
+        const response = await fetch("/api/prototype/numbering", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({ company, date: requestDate, action: "allocate" }),
+        });
+        const allocation = await response.json();
+        if (!response.ok) throw new Error(allocation.error ?? "Could not allocate request numbers");
+        const id = crypto.randomUUID();
+        const approval = resolvePrototypeApproval(nature, total(lines), workflows);
+        save({
         id,
-        number: generateRequestNumber(company, requestDate, id),
-        invoiceNumber: generateInvoiceNumber(company, requestDate, id),
+        number: allocation.requestNumber,
+        invoiceNumber: allocation.invoiceNumber,
         requester: "Alex Rivera",
         payee,
         company,
@@ -947,26 +1080,31 @@ function NewRequest({
         currency,
         nature,
         other,
-        status: submit ? "Pending Manager Approval" : "Draft",
+        status: submit ? approval.status : "Draft",
+        approvalPlan: submit ? approval.approvalPlan : undefined,
+        approvalStep: submit ? approval.approvalStep : undefined,
+        requireApValidation: submit ? approval.requireApValidation : undefined,
         lines,
         documents: docs,
         timeline: [
           "Draft created",
-          ...(submit ? ["Requester attested and submitted"] : []),
+          ...(submit ? [`Requester attested and submitted · ${approval.approvalPlan.length ? approval.approvalPlan.join(" → ") : approval.requireApValidation ? "AP validation" : "Direct to QuickBooks"}`] : []),
         ],
       });
+      } catch (error) {
+        setValidationErrors([error instanceof Error ? error.message : "Could not save this request. Please try again."]);
+      } finally {
+        setSaving(false);
+      }
     };
   return (
     <>
       <span className="eyebrow">Requester workspace</span>
       <div className="paper">
         <div className="company-head">
-          <div className="svi-logo">SVI</div>
+          <div className="svi-logo">{numberingRule.code}</div>
           <div>
-            <strong>SVI Technologies Inc.</strong>
-            <div className="fine">
-              22/F Antel Global Corporate Center, Pasig City · (63 2) 8633 8788
-            </div>
+            <strong>{company}</strong>
           </div>
         </div>
         <h1 className="form-title">REQUEST FOR PAYMENT FORM</h1>
@@ -985,33 +1123,33 @@ function NewRequest({
           </Field>
           <div className="numbering-rule-card">
             <span>NUMBERING RULE</span>
-            <strong>{patternExample(numberingRule.invoicePattern)}</strong>
+            <strong>{predictedInvoiceNumber}</strong>
             <small>
-              Invoice format · {numberingRule.reset.toLowerCase()} sequence reset
+              Expected invoice number · updates live; {numberingRule.reset.toLowerCase()} reset
             </small>
           </div>
           <Field label="DATE">
             <input
               type="date"
-              value={new Date().toISOString().slice(0, 10)}
-              readOnly
+              value={requestDate}
+              onChange={(event) => setRequestDate(event.target.value)}
             />
           </Field>
           <Field label="REQUESTOR">
             <input value="Alex Rivera" readOnly />
           </Field>
           <Field label="PAYEE">
-            <input
-              list="new-request-payees"
+            <select
               value={payee}
-              onChange={(e) => setPayee(e.target.value)}
-              placeholder="Select or enter a payee"
-            />
-            <datalist id="new-request-payees">
+              onChange={(event) => setPayee(event.target.value)}
+            >
+              <option value="">Select a payee</option>
               {payeeOptions.map((option) => (
-                <option key={option} value={option} />
+                <option key={option} value={option}>
+                  {option}
+                </option>
               ))}
-            </datalist>
+            </select>
           </Field>
           <Field label="CURRENCY">
             <select
@@ -1089,22 +1227,65 @@ function NewRequest({
           <span>TOTAL AMOUNT</span>
           <span>{cash(total(lines), currency)}</span>
         </div>
-        <section className="nature-section"><div><span className="eyebrow">Payment classification</span><h2>NATURE OF PAYMENT</h2><p className="muted">Choose the category that best describes this request.</p></div><NaturePicker value={nature} onChange={setNature}/></section>
-        <h2 className="section">Supporting Documents</h2>
-        <label className="upload">
-          Choose demo files
-          <input
-            type="file"
-            multiple
-            accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.doc,.docx"
-            onChange={(e) => void readDocuments(e.target.files)}
-          />
-        </label>
-        {docs.map((d) => (
-          <span className="badge green" key={d.name}>
-            {d.name}
-          </span>
-        ))}
+        <section className="nature-section"><div><span className="eyebrow">Payment classification</span><h2>NATURE OF PAYMENT</h2><p className="muted">Choose the category that best describes this request.</p></div><NaturePicker value={nature} options={natureOptions} onChange={setNature}/></section>
+        <section className="supporting-documents" aria-labelledby="supporting-documents-title">
+          <div className="supporting-documents-heading">
+            <div>
+              <h2 id="supporting-documents-title">Supporting Documents</h2>
+              <p>Add receipts, invoices, or other files related to this request.</p>
+            </div>
+            <span className="document-count">{docs.length} / 30</span>
+          </div>
+          <label
+            className={`document-dropzone${isDraggingDocuments ? " is-dragging" : ""}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setIsDraggingDocuments(true);
+            }}
+            onDragLeave={() => setIsDraggingDocuments(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setIsDraggingDocuments(false);
+              void readDocuments(event.dataTransfer.files);
+            }}
+          >
+            <input
+              className="document-file-input"
+              type="file"
+              multiple
+              accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.doc,.docx"
+              aria-label="Choose supporting documents"
+              onChange={(event) => {
+                void readDocuments(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <span className="document-upload-icon" aria-hidden="true">↑</span>
+            <span className="document-drop-title">Drop files here, or <strong>browse</strong></span>
+            <span className="document-drop-note">PDF, images, Word, or Excel · Up to 30 files</span>
+          </label>
+          {documentError && <p className="document-error" role="alert">{documentError}</p>}
+          {docs.length > 0 && (
+            <ul className="document-list" aria-label="Attached supporting documents">
+              {docs.map((document, index) => (
+                <li className="document-list-item" key={`${document.name}-${index}`}>
+                  <span className="document-file-badge" aria-hidden="true">
+                    {document.name.split(".").pop()?.slice(0, 4).toUpperCase() || "FILE"}
+                  </span>
+                  <span className="document-file-name" title={document.name}>{document.name}</span>
+                  <button
+                    className="document-remove"
+                    type="button"
+                    aria-label={`Remove ${document.name}`}
+                    onClick={() => setDocs((current) => current.filter((_, currentIndex) => currentIndex !== index))}
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
         <div className="attest">
           <input type="checkbox" defaultChecked /> I certify that this request
           is complete and accurate.
@@ -1119,11 +1300,11 @@ function NewRequest({
           </div>
         )}
         <div className="actions">
-          <button className="button secondary" onClick={() => done(false)}>
-            Save draft
+          <button className="button secondary" disabled={saving} onClick={() => void done(false)}>
+            {saving ? "Assigning number…" : "Save draft"}
           </button>
-          <button className="button" onClick={() => done(true)}>
-            Attest and submit
+          <button className="button" disabled={saving} onClick={() => void done(true)}>
+            {saving ? "Assigning number…" : "Attest and submit"}
           </button>
         </div>
       </div>
@@ -1144,16 +1325,16 @@ function Field({
     </div>
   );
 }
-function NaturePicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function NaturePicker({ value, options, onChange }: { value: string; options: string[]; onChange: (value: string) => void }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const visibleOptions = types.filter((option) => option.toLowerCase().includes(query.trim().toLowerCase()));
+  const visibleOptions = options.filter((option) => option.toLowerCase().includes(query.trim().toLowerCase()));
   const close = () => { setOpen(false); setQuery(""); };
   return <div className="nature-picker">
     <button className="nature-trigger" type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(true)}><span className="nature-trigger-icon">◎</span><span><small>Selected category</small><strong>{value}</strong></span><span className="nature-chevron">⌄</span></button>
     {open && typeof document !== "undefined" && createPortal(<div className="prototype nature-portal"><button className="nature-backdrop" type="button" aria-label="Close nature of payment options" onClick={close}/><section className="nature-menu" role="dialog" aria-modal="true" aria-label="Select nature of payment">
       <div className="nature-menu-head"><div><span className="eyebrow">Nature of payment</span><h3>Select a category</h3><p>Choose the option that best matches this request.</p></div><button className="nature-close" type="button" aria-label="Close" onClick={close}>×</button></div>
-      <div className="nature-search"><span>⌕</span><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${types.length} payment types`} aria-label="Search nature of payment options"/></div>
+      <div className="nature-search"><span>⌕</span><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${options.length} payment types`} aria-label="Search nature of payment options"/></div>
       <div className="nature-options" role="listbox">{visibleOptions.map((option, index) => <button type="button" role="option" aria-selected={value === option} className={`nature-option ${value === option ? "active" : ""}`} key={option} onClick={() => { onChange(option); close(); }}><span className="nature-option-number">{String(index + 1).padStart(2, "0")}</span><span>{option}</span>{value === option && <span className="nature-check">✓</span>}</button>)}{!visibleOptions.length && <div className="nature-empty">No matching payment type.</div>}</div>
       <footer><span>{visibleOptions.length} option{visibleOptions.length === 1 ? "" : "s"}</span><button className="button secondary" type="button" onClick={close}>Cancel</button></footer>
     </section></div>, document.body)}
@@ -1163,18 +1344,24 @@ function Details({
   role,
   request,
   update,
+  undoStatusAction,
   notify,
   projectCodes,
   accountOptions,
   payeeOptions,
+  natureOptions,
+  workflows,
 }: {
   role: Role;
   request: Req;
   update: (id: string, c: Partial<Req>, e: string) => void;
+  undoStatusAction: (id: string) => void;
   notify: (x: string) => void;
   projectCodes: string[];
   accountOptions: string[];
   payeeOptions: string[];
+  natureOptions: string[];
+  workflows: MasterData["workflows"];
 }) {
   const [generating, setGenerating] = useState(false);
   const [previewDocument, setPreviewDocument] = useState<Attachment | null>(null);
@@ -1203,7 +1390,8 @@ function Details({
     if (validationErrors.length) { notify(validationErrors[0]); return; }
     if (operationalEditor && !editReason.trim()) { notify("Enter an edit reason for the audit timeline"); return; }
     const event = requesterRevision ? (resubmit ? "Requester revised fields and resubmitted" : "Requester saved revised draft") : `${role} edited request data · ${editReason.trim()}`;
-    update(request.id, { ...draft, status: requesterRevision && resubmit ? "Pending Manager Approval" : request.status }, event);
+    const approval = resolvePrototypeApproval(draft.nature, total(draft.lines), workflows);
+    update(request.id, { ...draft, ...(requesterRevision && resubmit ? { status: approval.status, approvalPlan: approval.approvalPlan, approvalStep: 0, requireApValidation: approval.requireApValidation } : { status: request.status }) }, event);
     setEditing(false);
     notify(resubmit ? "Revision submitted" : "Changes saved and audited");
   };
@@ -1211,19 +1399,14 @@ function Details({
       update(request.id, { status: s }, e);
       notify(e);
     },
-    csv = () => {
-      const body = [
-          "Project Code,Account,Particulars,Amount",
-          ...request.lines.map((l) =>
-            [l.project, l.account, l.particulars, l.amount]
-              .map((x) => `"${x}"`)
-              .join(","),
-          ),
-        ].join("\r\n"),
-        a = document.createElement("a");
-      a.href = URL.createObjectURL(new Blob([body], { type: "text/csv" }));
-      a.download = `${request.number}-quickbooks.csv`;
-      a.click();
+    approveStage = (stage: ApprovalPlanStep, actor: string) => {
+      const plan = requestApprovalPlan(request);
+      const currentStep = requestApprovalStepIndex(request, plan);
+      const nextStep = currentStep + 1;
+      const nextStage = plan[nextStep];
+      const status: Status = nextStage === "Manager Approval" ? "Pending Manager Approval" : nextStage === "Accounting Review" ? "Pending Accounting Review" : nextStage === "AP Validation" ? "Pending AP Validation" : "Ready for QuickBooks";
+      update(request.id, { status, approvalPlan: plan, approvalStep: nextStep }, `${stage} approved by ${actor}`);
+      notify(`${stage} approved`);
     };
   const generateInvoice = async () => {
     setGenerating(true);
@@ -1243,6 +1426,18 @@ function Details({
     update(request.id, {}, "SaaSAnt Bill CSV generated");
     notify("SaaSAnt Bill CSV downloaded");
   };
+  const requestApprovalSteps = requestApprovalPlan(request);
+  const activeApprovalStep = requestApprovalStepIndex(request, requestApprovalSteps);
+  const executionSteps = ["Request Submitted", ...requestApprovalSteps.map((step) => step === "AP Validation" ? "AP Processor: Validate" : step), "AP Processor: Generate CSV & Post", "Posted to QuickBooks"];
+  const currentExecutionStep = request.status === "Pending Manager Approval" || request.status === "Pending Accounting Review"
+    ? 1 + activeApprovalStep
+    : request.status === "Pending AP Validation" || request.status === "Manager Approved"
+      ? 1 + activeApprovalStep
+      : request.status === "Ready for QuickBooks"
+        ? 1 + requestApprovalSteps.length
+        : ["Posted to QuickBooks", "Paid", "Reconciled", "Closed"].includes(request.status)
+          ? executionSteps.length - 1
+        : 0;
   return (
     <>
       <div className="form-head">
@@ -1270,7 +1465,7 @@ function Details({
       </div>
       {editing && <section className="paper request-editor">
         <div className="form-head"><div><span className="eyebrow">{requesterRevision ? "Revision workspace" : "Controlled AP edit"}</span><h2>{requesterRevision ? "Revise returned request" : "Edit request data and descriptions"}</h2><p className="muted">Every saved change is recorded in the immutable timeline.</p></div><button className="icon-button" aria-label="Close editor" onClick={() => setEditing(false)}>×</button></div>
-        <div className="grid grid-2"><Field label="PAYEE"><input list="edit-request-payees" value={draft.payee} onChange={(event) => setDraft((current) => ({ ...current, payee: event.target.value }))}/><datalist id="edit-request-payees">{payeeOptions.map((option) => <option key={option} value={option}/>)}</datalist></Field><Field label="CURRENCY"><select value={draft.currency} onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value }))}><option>PHP</option><option>USD</option></select></Field></div><div className="section"><Field label="NATURE OF PAYMENT"><NaturePicker value={draft.nature} onChange={(nature) => setDraft((current) => ({ ...current, nature, other: "" }))}/></Field></div>
+        <div className="grid grid-2"><Field label="PAYEE"><input list="edit-request-payees" value={draft.payee} onChange={(event) => setDraft((current) => ({ ...current, payee: event.target.value }))}/><datalist id="edit-request-payees">{payeeOptions.map((option) => <option key={option} value={option}/>)}</datalist></Field><Field label="CURRENCY"><select value={draft.currency} onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value }))}><option>PHP</option><option>USD</option></select></Field></div><div className="section"><Field label="NATURE OF PAYMENT"><NaturePicker value={draft.nature} options={natureOptions} onChange={(nature) => setDraft((current) => ({ ...current, nature, other: "" }))}/></Field></div>
         <h2 className="section">Request line items</h2>
         {draft.lines.map((line, index) => <div className="line-grid" key={index}><Field label="PROJECT CODE"><select value={line.project} onChange={(event) => changeDraftLine(index, "project", event.target.value)}>{projectCodes.map((project) => <option key={project}>{project}</option>)}</select></Field><Field label="ACCOUNT"><select value={line.account} onChange={(event) => changeDraftLine(index, "account", event.target.value)}><option value="">Accounting to complete</option>{accountOptions.map((account) => <option key={account}>{account}</option>)}</select></Field><Field label="PARTICULARS / DESCRIPTION"><textarea value={line.particulars} onChange={(event) => changeDraftLine(index, "particulars", event.target.value)}/></Field><Field label="AMOUNT"><input inputMode="decimal" value={line.amount} onChange={(event) => changeDraftLine(index, "amount", event.target.value)}/></Field><button className="button secondary" disabled={draft.lines.length === 1} onClick={() => setDraft((current) => ({ ...current, lines: current.lines.filter((_, lineIndex) => lineIndex !== index) }))}>×</button></div>)}
         <div className="editor-toolbar"><button className="button secondary" onClick={() => setDraft((current) => ({ ...current, lines: [...current.lines, { project: projectCodes[0] ?? "", account: "", particulars: "", amount: "" }] }))}>+ Add line</button><strong>Total: {cash(total(draft.lines), draft.currency)}</strong></div>
@@ -1341,6 +1536,7 @@ function Details({
       <Table rows={[request]} open={() => {}} />
       <section className="card section">
         <h2>{role} actions</h2>
+        {role !== "Auditor" && request.statusHistory?.length ? <div className="status-undo-panel"><div><strong>Previous status: {request.statusHistory[request.statusHistory.length - 1].status}</strong><small>Undo the most recent status or approval step for this request.</small></div><button className="button secondary" type="button" onClick={() => { undoStatusAction(request.id); notify("Last status action undone"); }}>Undo last status action</button></div> : null}
         <div className="actions">
           {role === "Approver" &&
             request.status === "Pending Manager Approval" && (
@@ -1348,7 +1544,7 @@ function Details({
                 <button
                   className="button"
                   onClick={() =>
-                    act("Manager Approved", "Approved by Jordan Reyes")
+                    approveStage("Manager Approval", "Jordan Reyes")
                   }
                 >
                   Approve
@@ -1372,37 +1568,39 @@ function Details({
                 </button>
               </>
             )}
+          {role === "AP Reviewer" && request.status === "Pending Accounting Review" && (
+            <>
+              <button className="button" onClick={() => approveStage("Accounting Review", "Taylor Cruz")}>Approve accounting review</button>
+              <button className="button secondary" onClick={() => act("Returned for Revision", "Accounting review returned for revision")}>Return</button>
+              <button className="button danger" onClick={() => act("Rejected", "Rejected during accounting review")}>Reject</button>
+            </>
+          )}
           {role === "AP Processor" &&
             ["Manager Approved", "Pending AP Validation"].includes(
-              request.status,
+            request.status,
             ) && (
-              <button
-                className="button"
-                onClick={() =>
-                  act(
-                    "Ready for QuickBooks",
-                    "AP validated documents and mappings",
-                  )
-                }
-              >
-                AP Validate
-              </button>
+              <>
+                <button className="button" onClick={() => approveStage("AP Validation", "Morgan Lee")}>
+                  {requestApprovalPlan(request)[requestApprovalStepIndex(request, requestApprovalPlan(request)) + 1] === "Accounting Review" ? "Validate & send to AP Reviewer" : "Complete AP validation"}
+                </button>
+                <button className="button secondary" onClick={() => act("Returned for Revision", "AP Processor found an issue and returned the request to the Requestor")}>Return to Requestor</button>
+              </>
             )}
           {role === "AP Processor" &&
             request.status === "Ready for QuickBooks" && (
               <button
                 className="button"
                 onClick={() => {
-                  csv();
+                  downloadSaasantBillCsv(request);
                   update(
                     request.id,
                     {
                       status: "Posted to QuickBooks",
                       qbId: `QB-DEMO-${request.id.slice(-4)}`,
                     },
-                    "QuickBooks CSV generated and posting confirmed",
+                    "SaaSAnt-compatible bill CSV generated and posting confirmed",
                   );
-                  notify("QuickBooks CSV downloaded");
+                  notify("Matching SaaSAnt bill CSV downloaded and posted to QuickBooks");
                 }}
               >
                 Generate QB CSV & Post
@@ -1441,6 +1639,11 @@ function Details({
             <span className="notice">Read-only access enforced</span>
           )}
         </div>
+      </section>
+      <section className="card section">
+        <h2>Workflow Timeline</h2>
+        <p className="muted">The submitted diagram is executed step by step. Repeated stages show approved loops or returns to an earlier block.</p>
+        <ol className="workflow-execution-timeline">{executionSteps.map((step, index) => <li className={index < currentExecutionStep ? "completed" : index === currentExecutionStep ? "current" : "upcoming"} key={`${step}-${index}`}><b>{index}</b><span><strong>{step}</strong><small>{index < currentExecutionStep ? "Completed" : index === currentExecutionStep ? "Current step" : "Upcoming"}</small></span></li>)}</ol>
       </section>
       <section className="card section">
         <h2>Immutable Timeline</h2>
@@ -1516,17 +1719,44 @@ function Settings({
   onChange: React.Dispatch<React.SetStateAction<MasterData>>;
   notify: (message: string) => void;
 }) {
-  const updateList = (key: keyof MasterData, values: string[]) =>
+  const [workflowNature, setWorkflowNature] = useState(masterData.natureOfPayments[0] ?? "");
+  useEffect(() => {
+    if (!masterData.natureOfPayments.includes(workflowNature)) {
+      setWorkflowNature(masterData.natureOfPayments[0] ?? "");
+    }
+  }, [masterData.natureOfPayments, workflowNature]);
+  const updateList = (key: "projects" | "accounts" | "payees", values: string[]) =>
     onChange((current) => ({ ...current, [key]: values }));
+  const updateNatureOptions = (values: string[]) => onChange((current) => {
+    const removed = current.natureOfPayments.filter((nature) => !values.includes(nature));
+    const added = values.filter((nature) => !current.natureOfPayments.includes(nature));
+    const renamedFrom = removed.length === 1 && added.length === 1 ? removed[0] : undefined;
+    const renamedTo = renamedFrom ? added[0] : undefined;
+    const workflows = Object.fromEntries(values.map((nature) => [
+      nature,
+      current.workflows[nature]
+        ?? (nature === renamedTo && renamedFrom ? current.workflows[renamedFrom] : undefined)
+        ?? { ...defaultWorkflow, diagram: clonePrototypeDiagram() },
+    ]));
+    return { ...current, natureOfPayments: values, workflows };
+  });
+  const workflow = masterData.workflows[workflowNature] ?? defaultWorkflow;
+  const previewAmount = Number(workflow.accountingThreshold.replaceAll(",", "")) || 0;
+  const resolvedWorkflowPreview = resolvePrototypeApproval(workflowNature, previewAmount, { [workflowNature]: workflow });
+  const diagramTrace = tracePrototypeDiagram(workflow, previewAmount);
+  const updateWorkflow = (change: Partial<WorkflowControl>, announce = true) => {
+    onChange((current) => ({ ...current, workflows: { ...current.workflows, [workflowNature]: { ...(current.workflows[workflowNature] ?? defaultWorkflow), ...change } } }));
+    if (announce) notify(`${workflowNature} workflow updated`);
+  };
 
   return (
     <>
       <section className="settings-hero">
         <div>
           <span className="eyebrow">Administration</span>
-          <h1>Master Data Settings</h1>
+          <h1>Administration Settings</h1>
           <p className="muted">
-            Manage the choices available across payment requests and revisions.
+            Manage approval workflows and master data for the complete AP process.
           </p>
         </div>
         <div className="settings-access">
@@ -1535,10 +1765,29 @@ function Settings({
         </div>
       </section>
       <div className="settings-summary">
+        <Metric label="Workflow rules" value={Object.keys(masterData.workflows).length} />
         <Metric label="Project codes" value={masterData.projects.length} />
         <Metric label="Accounts" value={masterData.accounts.length} />
         <Metric label="Payees / vendors" value={masterData.payees.length} />
+        <Metric label="Payment types" value={masterData.natureOfPayments.length} />
       </div>
+      <section className="workflow-settings-card">
+        <header className="workflow-settings-head"><div><span className="eyebrow">Approval process controls</span><h2>Workflow by Nature of Payment</h2><p>Select a payment type and define the stages a new or resubmitted request must follow.</p></div><span className="badge green">Auto-saved</span></header>
+        <div className="workflow-settings-layout">
+          <div className="field"><label>NATURE OF PAYMENT</label><select aria-label="NATURE OF PAYMENT" value={workflowNature} onChange={(event) => setWorkflowNature(event.target.value)}>{masterData.natureOfPayments.map((nature) => <option key={nature}>{nature}</option>)}</select></div>
+          <div className="workflow-control-list">
+            <label className="workflow-toggle"><input type="checkbox" checked={workflow.managerApproval} onChange={(event) => updateWorkflow({ managerApproval: event.target.checked })}/><span><strong>Manager approval</strong><small>Route to an Approver before AP processing.</small></span></label>
+            <label className="workflow-toggle"><input type="checkbox" checked={workflow.accountingReview} onChange={(event) => updateWorkflow({ accountingReview: event.target.checked })}/><span><strong>Accounting review</strong><small>Add an AP Reviewer approval stage.</small></span></label>
+            <label className="workflow-toggle"><input type="checkbox" checked={workflow.requireApValidation} onChange={(event) => updateWorkflow({ requireApValidation: event.target.checked })}/><span><strong>AP validation</strong><small>Require AP document and mapping validation after approvals.</small></span></label>
+          </div>
+          <div className="grid grid-2 workflow-fields">
+            <div className="field"><label>ACCOUNTING THRESHOLD</label><input aria-label="ACCOUNTING THRESHOLD" inputMode="decimal" value={workflow.accountingThreshold} disabled={!workflow.accountingReview} onChange={(event) => updateWorkflow({ accountingThreshold: event.target.value })} placeholder="Always required when blank"/><span className="fine">Accounting review applies at or above this amount.</span></div>
+            <div className="field"><label>APPROVAL SLA (HOURS)</label><input aria-label="APPROVAL SLA (HOURS)" type="number" min="1" max="720" value={workflow.slaHours} onChange={(event) => updateWorkflow({ slaHours: Math.min(720, Math.max(1, Number(event.target.value) || 1)) })}/></div>
+          </div>
+          <div className="workflow-preview"><span>Resolved route</span><div>{resolvedWorkflowPreview.approvalPlan.map((stage, index) => <span key={`${stage}-${index}`}>{index > 0 && <i>→</i>}<strong>{stage === "AP Validation" ? "AP Processor: Validate" : stage}{stage === "Accounting Review" && workflow.accountingThreshold ? ` ≥ ${workflow.accountingThreshold}` : ""}</strong></span>)}{!resolvedWorkflowPreview.approvalPlan.length && <strong>Direct to QuickBooks</strong>}<i>→</i><strong>AP Processor: Generate CSV &amp; Post</strong></div><small>SLA: {workflow.slaHours} hours per approval stage</small></div>
+          <WorkflowDiagramEditor diagram={workflow.diagram ?? clonePrototypeDiagram()} active={{ manager: workflow.managerApproval, accounting: workflow.accountingReview, ap: workflow.requireApValidation }} trace={diagramTrace} onChange={(diagram) => updateWorkflow({ diagram }, false)} notify={notify}/>
+        </div>
+      </section>
       <div className="settings-grid">
         <MasterDataEditor
           icon="P"
@@ -1567,12 +1816,123 @@ function Settings({
           onChange={(values) => updateList("payees", values)}
           notify={notify}
         />
+        <MasterDataEditor
+          icon="N"
+          title="Nature of Payment"
+          singular="payment type"
+          description="Controls the payment categories available on new requests and their workflow settings."
+          values={masterData.natureOfPayments}
+          onChange={updateNatureOptions}
+          notify={notify}
+        />
       </div>
       <p className="settings-footnote">
-        Changes save automatically and immediately appear in new and editable requests.
+        Changes save automatically. Workflow changes apply to new submissions and resubmissions; in-progress requests keep their submitted route.
       </p>
     </>
   );
+}
+
+const workflowNodeLabels: Record<PrototypeWorkflowNodeRole, string> = { request: "Requestor", manager: "Approver", accounting: "Accounting Review", apProcessor: "AP Processor", apReviewer: "AP Reviewer", treasury: "Treasury", recipient: "Recipient", quickbooks: "QuickBooks Ready" };
+const branchConditionLabels: Record<PrototypeBranchCondition, string> = { ALWAYS: "Always", AMOUNT_GTE_THRESHOLD: "Amount ≥ threshold", AMOUNT_LT_THRESHOLD: "Amount < threshold" };
+
+function WorkflowDiagramEditor({ diagram, active, trace, onChange, notify }: { diagram: PrototypeWorkflowDiagram; active: { manager: boolean; accounting: boolean; ap: boolean }; trace: ReturnType<typeof tracePrototypeDiagram>; onChange: (diagram: PrototypeWorkflowDiagram) => void; notify: (message: string) => void }) {
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [connectMode, setConnectMode] = useState(false);
+  const [connectionSource, setConnectionSource] = useState<PrototypeWorkflowNodeId | null>(null);
+  const [wirePoint, setWirePoint] = useState<{ x: number; y: number } | null>(null);
+  const [branchCondition, setBranchCondition] = useState<PrototypeBranchCondition>("ALWAYS");
+  const [newStageRole, setNewStageRole] = useState<PrototypeWorkflowNodeRole>("apProcessor");
+  const [dragging, setDragging] = useState<{ id: PrototypeWorkflowNodeId; offsetX: number; offsetY: number } | null>(null);
+  const roleOf = (id: PrototypeWorkflowNodeId) => normalizePrototypeDiagram(diagram).nodes.find((item) => item.id === id)?.role ?? "apProcessor";
+  const labelOf = (id: PrototypeWorkflowNodeId) => workflowNodeLabels[roleOf(id)];
+  const enabled = (id: PrototypeWorkflowNodeId) => { const role = roleOf(id); return role === "request" || role === "quickbooks" || (role === "manager" && active.manager) || (role === "accounting" && active.accounting) || ((role === "apProcessor" || role === "apReviewer") && active.ap) || role === "treasury" || role === "recipient"; };
+  const node = (id: PrototypeWorkflowNodeId) => diagram.nodes.find((item) => item.id === id) ?? clonePrototypeDiagram().nodes[0];
+  const canReach = (edges: PrototypeWorkflowDiagram["edges"], start: PrototypeWorkflowNodeId, target: PrototypeWorkflowNodeId) => { const pending: PrototypeWorkflowNodeId[] = [start]; const visited = new Set<PrototypeWorkflowNodeId>(); while (pending.length) { const current = pending.pop()!; if (current === target) return true; if (visited.has(current)) continue; visited.add(current); pending.push(...edges.filter((edge) => edge.from === current).map((edge) => edge.to)); } return false; };
+  const reachesQuickBooks = canReach(diagram.edges, "request", "quickbooks");
+  const selectConnectionNode = (id: PrototypeWorkflowNodeId) => {
+    if (!connectionSource) { setConnectionSource(id); return; }
+    const edges = diagram.edges.filter((edge) => !(edge.from === connectionSource && edge.condition === branchCondition));
+    onChange({ ...diagram, edges: [...edges, { from: connectionSource, to: id, condition: branchCondition }] });
+    notify(`${labelOf(connectionSource)} → ${labelOf(id)} (${branchConditionLabels[branchCondition]})`);
+    setConnectionSource(null);
+  };
+  const beginConnection = (event: React.PointerEvent<HTMLButtonElement>, id: PrototypeWorkflowNodeId) => {
+    event.stopPropagation();
+    event.preventDefault();
+    setConnectionSource(id);
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (rect) setWirePoint({ x: (event.clientX - rect.left) * (900 / rect.width), y: (event.clientY - rect.top) * (420 / rect.height) });
+  };
+  const removeConnection = (index: number) => {
+    onChange({ ...diagram, edges: diagram.edges.filter((_, edgeIndex) => edgeIndex !== index) });
+    notify("Arrow removed");
+  };
+  const removeStage = (id: PrototypeWorkflowNodeId) => {
+    onChange({ nodes: diagram.nodes.filter((item) => item.id !== id), edges: diagram.edges.filter((edge) => edge.from !== id && edge.to !== id) });
+    notify(`${labelOf(id)} block and its arrows removed`);
+  };
+  const finishConnection = (event: React.PointerEvent<HTMLDivElement>) => {
+    setDragging(null);
+    if (!connectionSource) return;
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-workflow-input]")?.dataset.workflowInput;
+    if (target) {
+      const edges = diagram.edges.filter((edge) => !(edge.from === connectionSource && edge.condition === branchCondition));
+      onChange({ ...diagram, edges: [...edges, { from: connectionSource, to: target, condition: branchCondition }] });
+    }
+    if (!connectMode || target) {
+      setConnectionSource(null);
+      setWirePoint(null);
+    }
+  };
+  const addStage = () => {
+    const matching = diagram.nodes.filter((item) => (item.role ?? roleOf(item.id)) === newStageRole).length;
+    const id = `${newStageRole}-${matching + 1}-${Date.now().toString(36)}`;
+    const x = Math.min(730, 100 + (diagram.nodes.length % 4) * 170);
+    const y = diagram.nodes.length % 2 === 0 ? 285 : 25;
+    onChange({ ...diagram, nodes: [...diagram.nodes, { id, role: newStageRole, x, y }] });
+    notify(`${workflowNodeLabels[newStageRole]} block added. Connect it to place it in the route.`);
+  };
+  const pointerDown = (event: React.PointerEvent<HTMLButtonElement>, id: PrototypeWorkflowNodeId) => {
+    if (connectMode) { selectConnectionNode(id); return; }
+    const rect = canvasRef.current?.getBoundingClientRect(); if (!rect) return;
+    const position = node(id); const scaleX = 900 / rect.width; const scaleY = 420 / rect.height;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging({ id, offsetX: (event.clientX - rect.left) * scaleX - position.x, offsetY: (event.clientY - rect.top) * scaleY - position.y });
+  };
+  const pointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (connectionSource && rect) setWirePoint({ x: (event.clientX - rect.left) * (900 / rect.width), y: (event.clientY - rect.top) * (420 / rect.height) });
+    if (!dragging) return;
+    if (!rect) return;
+    const x = Math.min(750, Math.max(0, (event.clientX - rect.left) * (900 / rect.width) - dragging.offsetX));
+    const y = Math.min(350, Math.max(0, (event.clientY - rect.top) * (420 / rect.height) - dragging.offsetY));
+    onChange({ ...diagram, nodes: diagram.nodes.map((item) => item.id === dragging.id ? { ...item, x, y } : item) });
+  };
+  return <section className="diagram-editor">
+    <header className="diagram-toolbar"><div><span className="eyebrow">Visual workflow designer</span><h3>Build a multi-step approval route</h3><p>Drag from a blue output handle to a green input handle. Click an arrow to remove it.</p></div><div className="actions"><button type="button" className={`button ${connectMode ? "" : "secondary"}`} onClick={() => { setConnectMode((value) => !value); setConnectionSource(null); setWirePoint(null); }}>{connectMode ? "Close arrow settings" : "Arrow settings"}</button><button type="button" className="button secondary" onClick={() => { onChange(clonePrototypeDiagram()); setConnectionSource(null); setWirePoint(null); notify("Workflow diagram reset"); }}>Reset layout</button></div></header>
+    <div className="diagram-add-stage"><label>Add a stage<select value={newStageRole} onChange={(event) => setNewStageRole(event.target.value as PrototypeWorkflowNodeRole)}><option value="manager">Approver</option><option value="accounting">Accounting Review</option><option value="apProcessor">AP Processor</option><option value="apReviewer">AP Reviewer</option><option value="treasury">Treasury</option><option value="recipient">Recipient</option></select></label><button type="button" className="button secondary" onClick={addStage}>Add block</button><small>You can add a role again to create a separate step.</small></div>
+    {connectMode && <div className="diagram-connect-controls"><div className="diagram-help">Drag between the blue output and green input handles. Drop on the same block to make a loop.</div><label>Condition for the next arrow<select value={branchCondition} onChange={(event) => setBranchCondition(event.target.value as PrototypeBranchCondition)}><option value="ALWAYS">Always</option><option value="AMOUNT_GTE_THRESHOLD">Amount ≥ threshold</option><option value="AMOUNT_LT_THRESHOLD">Amount &lt; threshold</option></select></label></div>}
+    {!reachesQuickBooks && <div className="notice">This diagram does not currently have a route to QuickBooks. Cycles are allowed and execute as one bounded pass per submission.</div>}
+    <div className={`workflow-canvas ${connectMode || connectionSource ? "connecting" : ""}`} ref={canvasRef} onPointerMove={pointerMove} onPointerUp={finishConnection} onPointerCancel={() => { setDragging(null); setConnectionSource(null); setWirePoint(null); }}>
+      <svg viewBox="0 0 900 420" preserveAspectRatio="none" aria-label="Workflow connections"><defs><marker id="workflow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs>{diagram.edges.map((edge, index) => {
+        const from = node(edge.from), to = node(edge.to), isSelfLoop = edge.from === edge.to;
+        const loopOnRight = from.x < 650;
+        const sideX = loopOnRight ? from.x + 145 : from.x;
+        const loopX = loopOnRight ? from.x + 220 : from.x - 75;
+        const path = isSelfLoop
+          ? `M ${sideX} ${from.y + 17} C ${loopX} ${from.y - 18}, ${loopX} ${from.y + 80}, ${sideX} ${from.y + 48}`
+          : `M ${from.x + 145} ${from.y + 31} C ${from.x + 185} ${from.y + 31 + index * 2}, ${to.x - 40} ${to.y + 31 - index * 2}, ${to.x} ${to.y + 31}`;
+        const midX = isSelfLoop ? loopX : (from.x + 145 + to.x) / 2;
+        const midY = isSelfLoop ? from.y + 31 : (from.y + to.y) / 2 + 23;
+        return <g key={`${edge.from}-${edge.to}-${edge.condition}`}><path className="workflow-edge-hit" d={path} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); removeConnection(index); }} /><path className={`workflow-edge ${edge.condition === "ALWAYS" ? "" : "conditional"} ${isSelfLoop ? "self-loop" : ""}`} d={path} markerEnd="url(#workflow-arrow)" pointerEvents="none" />{edge.condition !== "ALWAYS" && <text className="workflow-edge-label" textAnchor={isSelfLoop ? "middle" : undefined} x={midX} y={midY}>{edge.condition === "AMOUNT_GTE_THRESHOLD" ? "≥ threshold" : "< threshold"}</text>}</g>;
+      })}</svg>
+      {connectionSource && wirePoint && <svg className="workflow-wire-preview" viewBox="0 0 900 420" preserveAspectRatio="none"><path d={`M ${node(connectionSource).x + 145} ${node(connectionSource).y + 31} Q ${(node(connectionSource).x + 145 + wirePoint.x) / 2} ${(node(connectionSource).y + 31 + wirePoint.y) / 2 - 25} ${wirePoint.x} ${wirePoint.y}`} /></svg>}
+      {diagram.nodes.map((item) => { const hasSelfLoop = diagram.edges.some((edge) => edge.from === item.id && edge.to === item.id); const role = item.role ?? roleOf(item.id); const left = `${item.x / 9}%`; const top = `${item.y / 4.2}%`; const position = { left, top }; return <Fragment key={item.id}><button type="button" aria-label={`${workflowNodeLabels[role]} block`} className={`workflow-node ${enabled(item.id) ? "" : "disabled"} ${connectionSource === item.id ? "source" : ""} ${hasSelfLoop ? "has-self-loop" : ""}`} style={position} onPointerDown={(event) => pointerDown(event, item.id)}><small>{item.id === "request" || item.id === "quickbooks" ? "System" : "Control"}</small><strong>{workflowNodeLabels[role]}</strong><span>{enabled(item.id) ? "Active" : "Skipped"}</span>{hasSelfLoop && <em className="workflow-loop-badge">↻ Loop</em>}</button><button type="button" className="workflow-node-handle workflow-output-handle" style={{ left: `calc(${left} + 16.1%)`, top: `calc(${top} + 31px)` }} aria-label={`Start an arrow from ${labelOf(item.id)}`} onPointerDown={(event) => beginConnection(event, item.id)}>●</button><button type="button" data-workflow-input={item.id} className="workflow-node-handle workflow-input-handle" style={{ left, top: `calc(${top} + 31px)` }} aria-label={`Connect an arrow to ${labelOf(item.id)}`}>●</button>{item.id !== "request" && item.id !== "quickbooks" && <button type="button" className="workflow-node-remove" style={{ left: `calc(${left} + 15.5%)`, top: `calc(${top} - 7px)` }} title={`Remove ${labelOf(item.id)}`} aria-label={`Remove ${labelOf(item.id)} block`} onPointerDown={(event) => event.stopPropagation()} onClick={() => removeStage(item.id)}>×</button>}</Fragment>; })}
+    </div>
+    <div className="diagram-timeline"><span>Step-by-step preview</span><ol>{trace.steps.map((step, index) => <li className={index === trace.steps.length - 1 && trace.loopDetected ? "loop" : ""} key={`${step}-${index}`}><b>{index}</b><span>{workflowNodeLabels[step]}</span>{index === trace.steps.length - 1 && trace.loopDetected && <em>Loop returns here</em>}</li>)}</ol><small>{trace.reachedQuickBooks ? "Route reaches QuickBooks." : trace.loopDetected ? "Execution stops after one loop pass to prevent an infinite workflow." : "Add another connection to continue this route."}</small></div>
+    <div className="diagram-edge-list"><span>Connections</span>{diagram.edges.map((edge) => <button type="button" key={`${edge.from}-${edge.to}-${edge.condition}`} onClick={() => { onChange({ ...diagram, edges: diagram.edges.filter((item) => item !== edge) }); notify("Connection removed"); }}>{labelOf(edge.from)} → {labelOf(edge.to)} <em>{branchConditionLabels[edge.condition]}</em> <b>×</b></button>)}</div>
+  </section>;
 }
 
 function MasterDataEditor({
@@ -1583,6 +1943,7 @@ function MasterDataEditor({
   values,
   onChange,
   notify,
+  allowEdit = true,
 }: {
   icon: string;
   title: string;
@@ -1591,6 +1952,7 @@ function MasterDataEditor({
   values: string[];
   onChange: (values: string[]) => void;
   notify: (message: string) => void;
+  allowEdit?: boolean;
 }) {
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<number | null>(null);
@@ -1661,7 +2023,7 @@ function MasterDataEditor({
                 <button type="button" onClick={() => saveEdit(index)}>Save</button>
                 <button type="button" onClick={() => setEditing(null)}>Cancel</button>
               </> : <>
-                <button type="button" onClick={() => { setEditing(index); setEditValue(value); }}>Edit</button>
+                {allowEdit && <button type="button" onClick={() => { setEditing(index); setEditValue(value); }}>Edit</button>}
                 <button className="danger-link" type="button" onClick={() => remove(index)}>Remove</button>
               </>}
             </div>
@@ -1673,7 +2035,7 @@ function MasterDataEditor({
 }
 
 function Reports({ rows }: { rows: Req[] }) {
-  const workflowStages: [string, Status[]][] = [["Draft", ["Draft"]], ["Manager approval", ["Pending Manager Approval", "Manager Approved"]], ["AP review", ["Pending AP Validation"]], ["QuickBooks", ["Ready for QuickBooks", "Posted to QuickBooks"]], ["Payment & reconciliation", ["Paid", "Reconciled"]], ["Closed", ["Closed"]], ["Exceptions", ["Returned for Revision", "Rejected"]]];
+  const workflowStages: [string, Status[]][] = [["Draft", ["Draft"]], ["Manager approval", ["Pending Manager Approval", "Manager Approved"]], ["Accounting review", ["Pending Accounting Review"]], ["AP review", ["Pending AP Validation"]], ["QuickBooks", ["Ready for QuickBooks", "Posted to QuickBooks"]], ["Payment & reconciliation", ["Paid", "Reconciled"]], ["Closed", ["Closed"]], ["Exceptions", ["Returned for Revision", "Rejected"]]];
   const statusData = workflowStages.map(([label, statuses]): [string, number] => [label, rows.filter((request) => statuses.includes(request.status)).length]).filter(([, value]) => value > 0).sort((a, b) => b[1] - a[1]);
   const natureData = Object.entries(rows.filter((request) => request.currency === "PHP").reduce<Record<string, number>>((summary, request) => ({ ...summary, [request.nature]: (summary[request.nature] ?? 0) + total(request.lines) }), {})).sort((a, b) => b[1] - a[1]).slice(0, 6);
   const dailyData = Object.entries(rows.reduce<Record<string, number>>((summary, request) => ({ ...summary, [request.date]: (summary[request.date] ?? 0) + 1 }), {})).sort(([dateA], [dateB]) => dateA.localeCompare(dateB));

@@ -34,11 +34,37 @@ const requestSchema = z.object({
   qbId: z.string().max(200).optional(),
   paymentRef: z.string().max(200).optional(),
   reconciliationRef: z.string().max(200).optional(),
+  approvalPlan: z.array(z.enum(["Manager Approval", "Accounting Review", "AP Validation"])).max(12).optional(),
+  approvalStep: z.number().int().min(0).max(12).optional(),
+  requireApValidation: z.boolean().optional(),
+  statusHistory: z.array(z.object({
+    status: z.string().max(100),
+    approvalPlan: z.array(z.enum(["Manager Approval", "Accounting Review", "AP Validation"])).max(12).optional(),
+    approvalStep: z.number().int().min(0).max(12).optional(),
+    requireApValidation: z.boolean().optional(),
+    qbId: z.string().max(200).optional(),
+    paymentRef: z.string().max(200).optional(),
+    reconciliationRef: z.string().max(200).optional(),
+    event: z.string().max(1_000),
+  })).max(25).optional(),
+});
+const workflowControlSchema = z.object({
+  managerApproval: z.boolean(),
+  accountingReview: z.boolean(),
+  accountingThreshold: z.string().max(80),
+  requireApValidation: z.boolean(),
+  slaHours: z.number().int().min(1).max(720),
+  diagram: z.object({
+    nodes: z.array(z.object({ id: z.string().min(1).max(100), role: z.enum(["request", "manager", "accounting", "apProcessor", "apReviewer", "treasury", "recipient", "quickbooks"]).optional(), x: z.number().min(0).max(900), y: z.number().min(0).max(420) })).min(2).max(50),
+    edges: z.array(z.object({ from: z.string().min(1).max(100), to: z.string().min(1).max(100), condition: z.enum(["ALWAYS", "AMOUNT_GTE_THRESHOLD", "AMOUNT_LT_THRESHOLD"]).default("ALWAYS") })).max(100),
+  }),
 });
 const masterDataSchema = z.object({
   projects: z.array(z.string().trim().min(1).max(200)).min(1).max(500),
   accounts: z.array(z.string().trim().min(1).max(200)).min(1).max(500),
   payees: z.array(z.string().trim().min(1).max(300)).min(1).max(1_000),
+  natureOfPayments: z.array(z.string().trim().min(1).max(500)).min(1).max(200).optional(),
+  workflows: z.record(z.string(), workflowControlSchema).optional().default({}),
 });
 const stateSchema = z.object({
   profileId: z.string(),
@@ -76,18 +102,31 @@ export async function PUT(request: Request) {
     profile.role === "Administrator" || !existingMasterData.success
       ? parsed.data.masterData
       : existingMasterData.data;
-  const saved = await db.prototypeWorkspace.upsert({
-    where: { id: "default" },
-    create: {
-      id: "default",
-      requests: parsed.data.rows,
-      masterData,
-    },
-    update: {
-      requests: parsed.data.rows,
-      masterData,
-    },
-    select: { updatedAt: true },
-  });
+  let saved;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      saved = await db.$transaction(async (tx) => {
+        const current = await tx.prototypeWorkspace.findUnique({ where: { id: "default" } });
+        const currentRows = Array.isArray(current?.requests) ? current.requests : [];
+        const rowsById = new Map<string, (typeof parsed.data.rows)[number]>();
+        for (const row of currentRows) {
+          if (row && typeof row === "object" && "id" in row && typeof row.id === "string") {
+            rowsById.set(row.id, row as (typeof parsed.data.rows)[number]);
+          }
+        }
+        for (const row of parsed.data.rows) rowsById.set(row.id, row);
+        return tx.prototypeWorkspace.upsert({
+          where: { id: "default" },
+          create: { id: "default", requests: Array.from(rowsById.values()), masterData },
+          update: { requests: Array.from(rowsById.values()), masterData },
+          select: { updatedAt: true },
+        });
+      }, { isolationLevel: "Serializable" });
+      break;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+      if (code !== "P2034" || attempt === 2) throw error;
+    }
+  }
   return NextResponse.json(saved);
 }

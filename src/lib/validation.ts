@@ -44,3 +44,9 @@ export function validateUpload(file: { name: string; type: string; size: number 
   if (file.size <= 0 || file.size > maxBytes) throw new Error("File size is outside the permitted range");
   if (/[\\/:*?\"<>|\x00-\x1F]/.test(file.name)) throw new Error("Unsafe filename");
 }
+
+export function validateUploadBatch(files: { name: string; type: string; size: number }[], maxBytes = 10 * 1024 * 1024, maxFiles = 20) {
+  if (!files.length) throw new Error("Select at least one file");
+  if (files.length > maxFiles) throw new Error(`Select no more than ${maxFiles} files at a time`);
+  files.forEach((file) => validateUpload(file, maxBytes));
+}
