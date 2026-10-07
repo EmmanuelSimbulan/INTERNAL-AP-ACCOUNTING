@@ -75,6 +75,23 @@ type Req = {
   requireApValidation?: boolean;
   statusHistory?: StatusCheckpoint[];
 };
+type RequestSort = "newest" | "oldest" | "company-asc" | "company-desc";
+const requestSortOptions: Array<{ value: RequestSort; label: string }> = [
+  { value: "newest", label: "Date: newest to oldest" },
+  { value: "oldest", label: "Date: oldest to newest" },
+  { value: "company-asc", label: "Company: A to Z" },
+  { value: "company-desc", label: "Company: Z to A" },
+];
+function sortRequests(requests: Req[], sort: RequestSort) {
+  return [...requests].sort((a, b) => {
+    if (sort === "company-asc" || sort === "company-desc") {
+      const comparison = a.company.localeCompare(b.company, undefined, { sensitivity: "base" });
+      return (sort === "company-asc" ? comparison : -comparison) || b.date.localeCompare(a.date);
+    }
+    const comparison = a.date.slice(0, 10).localeCompare(b.date.slice(0, 10));
+    return sort === "newest" ? -comparison : comparison;
+  });
+}
 const standardRequestApprovalPlan: ApprovalPlanStep[] = ["Manager Approval", "AP Validation", "Accounting Review"];
 function requestApprovalPlan(request: Pick<Req, "approvalPlan" | "requireApValidation" | "status">): ApprovalPlanStep[] {
   const plan = [...(request.approvalPlan ?? (request.status === "Draft" ? [] : standardRequestApprovalPlan))];
@@ -725,7 +742,8 @@ function Dashboard({
   showAll: () => void;
   notify: (message: string) => void;
 }) {
-  const recentRows = [...rows].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+  const [recentSort, setRecentSort] = useState<RequestSort>("newest");
+  const recentRows = sortRequests(rows, recentSort).slice(0, 5);
   const bulkBills = rows.filter(
     (request) =>
       ![
@@ -781,9 +799,12 @@ function Dashboard({
               <h2>Recent requests</h2>
               <p>Latest requests by request date</p>
             </div>
-            <button type="button" className="show-more-link" onClick={showAll} aria-label={`Show all ${rows.length} requests`}>
-              Show more <span aria-hidden="true">›</span>
-            </button>
+            <div className="recent-request-actions">
+              <label className="recent-sort-control"><span>Sort by</span><select aria-label="Sort recent requests" value={recentSort} onChange={(event) => setRecentSort(event.target.value as RequestSort)}>{requestSortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+              <button type="button" className="show-more-link" onClick={showAll} aria-label={`Show all ${rows.length} requests`}>
+                Show more <span aria-hidden="true">›</span>
+              </button>
+            </div>
           </div>
           <Table rows={recentRows} open={open} />
         </section>
@@ -927,6 +948,7 @@ function Queue({
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [status, setStatus] = useState("");
+  const [sortBy, setSortBy] = useState<RequestSort>("newest");
   const companies = [...new Set(queueRows.map((request) => request.company).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const statuses = [...new Set(queueRows.map((request) => request.status))].sort((a, b) => a.localeCompare(b));
   const query = search.trim().toLocaleLowerCase();
@@ -935,6 +957,7 @@ function Queue({
     const requestDate = request.date.slice(0, 10);
     return matchesSearch && (!company || request.company === company) && (!fromDate || requestDate >= fromDate) && (!toDate || requestDate <= toDate) && (!status || request.status === status);
   });
+  const sorted = sortRequests(filtered, sortBy);
   const hasFilters = Boolean(search || company || fromDate || toDate || status);
   const clearFilters = () => { setSearch(""); setCompany(""); setFromDate(""); setToDate(""); setStatus(""); };
   return (
@@ -974,10 +997,16 @@ function Queue({
             {statuses.map((value) => <option key={value} value={value}>{value}</option>)}
           </select>
         </label>
+        <label className="request-filter">
+          <span>Sort requests</span>
+          <select value={sortBy} onChange={(event) => setSortBy(event.target.value as RequestSort)}>
+            {requestSortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
         {hasFilters && <button type="button" className="clear-request-filters" onClick={clearFilters}>Clear filters</button>}
-        <p className="request-filter-count">Showing {filtered.length} of {queueRows.length} requests</p>
+        <p className="request-filter-count">Showing {sorted.length} of {queueRows.length} requests</p>
       </section>
-      <Table rows={filtered} open={open} />
+      <Table rows={sorted} open={open} />
     </>
   );
 }

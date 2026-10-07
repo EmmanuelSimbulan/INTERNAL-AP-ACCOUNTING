@@ -1413,6 +1413,21 @@
   font-size: 10px;
   font-weight: 650;
 }
+.recent-request-actions { display: flex; align-items: center; gap: 8px; }
+.recent-sort-control { display: inline-flex; align-items: center; gap: 7px; color: var(--p-secondary); font-size: 10px; font-weight: 600; white-space: nowrap; }
+.prototype .recent-sort-control select {
+  max-width: 175px;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid rgba(28, 43, 68, .12);
+  border-radius: 9px;
+  outline: 0;
+  background: rgba(255, 255, 255, .92);
+  color: var(--p-text);
+  font: inherit;
+  font-size: 10px;
+}
+.prototype .recent-sort-control select:focus { border-color: rgba(0, 113, 227, .55); box-shadow: 0 0 0 3px rgba(0, 113, 227, .1); }
 .show-more-link {
   display: inline-flex;
   align-items: center;
