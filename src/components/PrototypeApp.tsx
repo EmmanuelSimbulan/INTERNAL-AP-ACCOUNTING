@@ -12,11 +12,12 @@ import {
   getCompanyNumberingRule,
 } from "@/lib/company-numbering";
 import { demoProfiles, type DemoRole as Role } from "@/lib/demo-profiles";
+import { createPrototypeConfigTemplate, prototypeConfigDefinitions, type PrototypeConfigImportPreview, type PrototypeConfigType } from "@/lib/prototype-config-import";
 import {
   getPrototypeRequestErrors,
   parsePrototypeAmount,
 } from "@/lib/prototype-validation";
-import { clonePrototypeDiagram, normalizePrototypeDiagram, resolvePrototypeApproval, tracePrototypeDiagram, type PrototypeBranchCondition, type PrototypeWorkflowControl as WorkflowControl, type PrototypeWorkflowDiagram, type PrototypeWorkflowNodeId, type PrototypeWorkflowNodeRole } from "@/lib/prototype-workflow";
+import { clonePrototypeDiagram, createDefaultPrototypeWorkflowControl, normalizePrototypeDiagram, resolvePrototypeApproval, tracePrototypeDiagram, type PrototypeBranchCondition, type PrototypeWorkflowControl as WorkflowControl, type PrototypeWorkflowDiagram, type PrototypeWorkflowNodeId, type PrototypeWorkflowNodeRole } from "@/lib/prototype-workflow";
 type Status =
   | "Draft"
   | "Pending Manager Approval"
@@ -158,7 +159,7 @@ const projects = [
   ];
 type VendorCurrency = "PHP" | "USD" | "BOTH";
 type MasterData = { projects: string[]; accounts: string[]; payees: string[]; vendorCurrencies: Record<string, VendorCurrency>; natureOfPayments: string[]; workflows: Record<string, WorkflowControl> };
-const defaultWorkflow: WorkflowControl = { managerApproval: true, accountingReview: true, accountingThreshold: "", requireApValidation: true, slaHours: 48, diagram: clonePrototypeDiagram() };
+const defaultWorkflow: WorkflowControl = createDefaultPrototypeWorkflowControl();
 const defaultWorkflows = Object.fromEntries(defaultNatureOfPayments.map((nature) => [nature, { ...defaultWorkflow, diagram: clonePrototypeDiagram() }]));
 const defaultMasterData: MasterData = {
   projects: [...projects],
@@ -733,6 +734,7 @@ export function PrototypeApp() {
               masterData={masterData}
               onChange={setMasterData}
               notify={notify}
+              profileId={activeProfileId}
             />
           )}
         </div>
@@ -1852,10 +1854,12 @@ function Settings({
   masterData,
   onChange,
   notify,
+  profileId,
 }: {
   masterData: MasterData;
   onChange: React.Dispatch<React.SetStateAction<MasterData>>;
   notify: (message: string) => void;
+  profileId: string;
 }) {
   const [workflowNature, setWorkflowNature] = useState(masterData.natureOfPayments[0] ?? "");
   useEffect(() => {
@@ -1864,11 +1868,17 @@ function Settings({
     }
   }, [masterData.natureOfPayments, workflowNature]);
   const updateList = (key: "projects" | "accounts" | "payees", values: string[]) =>
-    onChange((current) => ({
-      ...current,
-      [key]: values,
-      ...(key === "payees" ? { vendorCurrencies: Object.fromEntries(values.map((payee) => [payee, current.vendorCurrencies[payee] ?? "BOTH"])) } : {}),
-    }));
+    onChange((current) => {
+      if (key !== "payees") return { ...current, [key]: values };
+      const removed = current.payees.filter((payee) => !values.includes(payee));
+      const added = values.filter((payee) => !current.payees.includes(payee));
+      const renamedCurrency = removed.length === 1 && added.length === 1 ? current.vendorCurrencies[removed[0]] : undefined;
+      return {
+        ...current,
+        payees: values,
+        vendorCurrencies: Object.fromEntries(values.map((payee) => [payee, current.vendorCurrencies[payee] ?? (payee === added[0] ? renamedCurrency : undefined) ?? "BOTH"])),
+      };
+    });
   const updateVendorCurrency = (payee: string, currency: VendorCurrency) => {
     onChange((current) => ({ ...current, vendorCurrencies: { ...current.vendorCurrencies, [payee]: currency } }));
     notify(`${payee} currency availability updated`);
@@ -1943,6 +1953,9 @@ function Settings({
           values={masterData.projects}
           onChange={(values) => updateList("projects", values)}
           notify={notify}
+          configType="projects"
+          profileId={profileId}
+          onImported={(next) => onChange((current) => normalizeMasterData({ ...current, ...next }))}
         />
         <MasterDataEditor
           icon="A"
@@ -1952,6 +1965,9 @@ function Settings({
           values={masterData.accounts}
           onChange={(values) => updateList("accounts", values)}
           notify={notify}
+          configType="accounts"
+          profileId={profileId}
+          onImported={(next) => onChange((current) => normalizeMasterData({ ...current, ...next }))}
         />
         <MasterDataEditor
           icon="V"
@@ -1963,6 +1979,9 @@ function Settings({
           vendorCurrencies={masterData.vendorCurrencies}
           onVendorCurrencyChange={updateVendorCurrency}
           notify={notify}
+          configType="payees"
+          profileId={profileId}
+          onImported={(next) => onChange((current) => normalizeMasterData({ ...current, ...next }))}
         />
         <MasterDataEditor
           icon="N"
@@ -1972,6 +1991,9 @@ function Settings({
           values={masterData.natureOfPayments}
           onChange={updateNatureOptions}
           notify={notify}
+          configType="natureOfPayments"
+          profileId={profileId}
+          onImported={(next) => onChange((current) => normalizeMasterData({ ...current, ...next }))}
         />
       </div>
       <p className="settings-footnote">
@@ -2094,6 +2116,9 @@ function MasterDataEditor({
   allowEdit = true,
   vendorCurrencies,
   onVendorCurrencyChange,
+  configType,
+  profileId,
+  onImported,
 }: {
   icon: string;
   title: string;
@@ -2105,10 +2130,19 @@ function MasterDataEditor({
   allowEdit?: boolean;
   vendorCurrencies?: MasterData["vendorCurrencies"];
   onVendorCurrencyChange?: (payee: string, currency: VendorCurrency) => void;
+  configType: PrototypeConfigType;
+  profileId: string;
+  onImported: (masterData: Partial<MasterData>) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importCsv, setImportCsv] = useState("");
+  const [importPreview, setImportPreview] = useState<PrototypeConfigImportPreview | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [showImportDetails, setShowImportDetails] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const duplicate = (value: string, ignoredIndex = -1) =>
     values.some(
       (item, index) =>
@@ -2137,6 +2171,81 @@ function MasterDataEditor({
     if (editing === index) setEditing(null);
     notify(`${value} removed`);
   };
+  const downloadFile = (filename: string, content: string) => {
+    const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  };
+  const downloadTemplate = () => downloadFile(`${configType}-template.csv`, createPrototypeConfigTemplate(configType));
+  const exportCurrent = async () => {
+    try {
+      const query = new URLSearchParams({ type: configType, profileId });
+      const response = await fetch(`/api/prototype/configuration?${query.toString()}`, { cache: "no-store" });
+      if (!response.ok) {
+        const result = await response.json();
+        throw new Error(result.error ?? "Could not export configuration");
+      }
+      downloadFile(`${configType}-settings.csv`, await response.text());
+      notify(`${prototypeConfigDefinitions[configType].title} exported`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not export configuration");
+    }
+  };
+  const inspectUpload = async (file: File | undefined) => {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".csv") && file.type !== "text/csv") {
+      notify("Choose a CSV file. Excel workbooks are not supported directly.");
+      return;
+    }
+    if (file.size > 1_500_000) { notify("CSV files must be smaller than 1.5 MB."); return; }
+    setImportBusy(true);
+    setImportPreview(null);
+    setShowImportDetails(false);
+    try {
+      const csv = await file.text();
+      const response = await fetch("/api/prototype/configuration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profileId, type: configType, action: "preview", csv }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Could not validate this CSV");
+      setImportCsv(csv);
+      setImportPreview(result as PrototypeConfigImportPreview);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not validate this CSV");
+    } finally {
+      setImportBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+  const confirmImport = async () => {
+    if (!importPreview?.validRecords) return;
+    setImportBusy(true);
+    try {
+      const response = await fetch("/api/prototype/configuration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profileId, type: configType, action: "commit", csv: importCsv }),
+      });
+      const result = await response.json() as { error?: string; importedRecords?: number; masterData?: Partial<MasterData> };
+      if (!response.ok || !result.masterData) throw new Error(result.error ?? "Could not import these records");
+      onImported(result.masterData);
+      notify(`${result.importedRecords ?? 0} ${singular}${result.importedRecords === 1 ? "" : "s"} imported; existing, duplicate, and invalid rows were skipped`);
+      setImportPreview(null);
+      setImportCsv("");
+      setImportOpen(false);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not import these records");
+    } finally {
+      setImportBusy(false);
+    }
+  };
 
   return (
     <section className="master-card">
@@ -2145,6 +2254,28 @@ function MasterDataEditor({
         <div><h2>{title}</h2><p>{description}</p></div>
         <span className="master-count">{values.length}</span>
       </header>
+      <div className="master-tools">
+        <button className="button secondary" type="button" onClick={() => { setImportOpen((open) => !open); setImportPreview(null); setImportCsv(""); }}>Bulk Import</button>
+        <button className="button secondary" type="button" onClick={downloadTemplate}>Download Template</button>
+        <button className="button secondary" type="button" onClick={() => void exportCurrent()}>Export</button>
+      </div>
+      {importOpen && <section className="master-import-panel" aria-label={`${prototypeConfigDefinitions[configType].title} bulk import`}>
+        <div className="master-import-heading"><strong>Import {prototypeConfigDefinitions[configType].title}</strong><button className="text-button" type="button" onClick={() => { setImportOpen(false); setImportPreview(null); }}>Close</button></div>
+        <p>Upload a CSV using these columns: <span>{prototypeConfigDefinitions[configType].headers.join(", ")}</span>. Import only adds new records; existing items are never overwritten. Empty rows are skipped.</p>
+        <small className="master-import-note">All listed columns are required. The current Settings model has no separate status, vendor-code, or account-type fields, so extra columns are rejected.</small>
+        {configType === "payees" && <small className="master-import-note">Currency accepts PHP, USD, BOTH, or PHP &amp; USD. Currency is part of each Payee/Vendor record.</small>}
+        <div className="master-import-actions"><button className="button secondary" type="button" onClick={downloadTemplate}>Download Template</button><input ref={fileInputRef} className="sr-only" type="file" accept=".csv,text/csv" aria-label={`Upload ${prototypeConfigDefinitions[configType].title} CSV`} onChange={(event) => void inspectUpload(event.target.files?.[0])}/><button className="button" type="button" disabled={importBusy} onClick={() => fileInputRef.current?.click()}>{importBusy ? "Validating…" : importPreview ? "Choose another CSV" : "Choose CSV"}</button></div>
+        {importPreview && <div className="master-import-preview">
+          <h3>Import Preview</h3>
+          <p>{importPreview.totalRecords} non-empty records in file · {importPreview.emptyRows} empty rows skipped</p>
+          <div className="import-counts"><span><b>{importPreview.validRecords}</b><small>New records</small></span><span><b>{importPreview.existingRecords}</b><small>Existing</small></span><span><b>{importPreview.duplicateRecords}</b><small>Duplicates</small></span><span><b>{importPreview.invalidRecords}</b><small>Invalid</small></span></div>
+          {importPreview.errors.map((error) => <div className="notice import-error" key={error}>{error}</div>)}
+          {(importPreview.invalidRecords > 0 || importPreview.duplicateRecords > 0 || importPreview.existingRecords > 0) && <button className="text-button import-errors-toggle" type="button" onClick={() => setShowImportDetails((show) => !show)}>{showImportDetails ? "Hide row details" : "View Errors & Skipped Rows"}</button>}
+          {showImportDetails && <div className="import-row-details">{importPreview.rows.filter((row) => row.status !== "new" && row.status !== "empty").map((row) => <div className={`import-row-detail ${row.status}`} key={`${row.rowNumber}-${row.label}`}><strong>Row {row.rowNumber}: {row.label}</strong><span>{row.message}</span></div>)}</div>}
+          <p className="master-import-confirm-note">Confirm adds only the {importPreview.validRecords} valid new {importPreview.validRecords === 1 ? "record" : "records"}. All other rows shown above remain unchanged.</p>
+          <div className="master-import-actions"><button className="button secondary" type="button" disabled={importBusy} onClick={() => { setImportPreview(null); setImportCsv(""); }}>Cancel</button><button className="button" type="button" disabled={importBusy || importPreview.validRecords === 0} onClick={() => void confirmImport()}>{importBusy ? "Importing…" : `Confirm Import (${importPreview.validRecords})`}</button></div>
+        </div>}
+      </section>}
       <div className="master-add">
         <input
           value={draft}

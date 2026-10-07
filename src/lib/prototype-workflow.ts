@@ -39,6 +39,10 @@ export function clonePrototypeDiagram(): PrototypeWorkflowDiagram {
   return { nodes: defaultPrototypeDiagram.nodes.map((node) => ({ ...node })), edges: defaultPrototypeDiagram.edges.map((edge) => ({ ...edge })) };
 }
 
+export function createDefaultPrototypeWorkflowControl(): PrototypeWorkflowControl {
+  return { managerApproval: true, accountingReview: true, accountingThreshold: "", requireApValidation: true, slaHours: 48, diagram: clonePrototypeDiagram() };
+}
+
 export function normalizePrototypeDiagram(diagram?: PrototypeWorkflowDiagram): PrototypeWorkflowDiagram {
   if (!diagram?.nodes?.length) return clonePrototypeDiagram();
   const legacyRole = (id: string): PrototypeWorkflowNodeRole => id === "ap" ? "apProcessor" : ["request", "manager", "accounting", "quickbooks"].includes(id) ? id as PrototypeWorkflowNodeRole : "apProcessor";
@@ -70,7 +74,7 @@ export function tracePrototypeDiagram(control: PrototypeWorkflowControl, amount:
 }
 
 export function resolvePrototypeApproval(nature: string, amount: number, workflows: Record<string, PrototypeWorkflowControl>) {
-  const control = workflows[nature] ?? { managerApproval: true, accountingReview: true, accountingThreshold: "", requireApValidation: true, slaHours: 48, diagram: clonePrototypeDiagram() };
+  const control = workflows[nature] ?? createDefaultPrototypeWorkflowControl();
   const threshold = Number(control.accountingThreshold.replaceAll(",", ""));
   const hasConditionalBranches = normalizePrototypeDiagram(control.diagram).edges.some((edge) => edge.condition !== "ALWAYS");
   const needsAccounting = control.accountingReview && (hasConditionalBranches || !control.accountingThreshold.trim() || (Number.isFinite(threshold) && amount >= threshold));
