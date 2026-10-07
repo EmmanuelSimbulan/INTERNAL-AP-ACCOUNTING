@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { demoProfiles } from "@/lib/demo-profiles";
@@ -169,29 +170,31 @@ export async function PUT(request: Request) {
         const hasChanges = !current || changedRequests.length > 0 || changedConfigSections.length > 0;
         if (!hasChanges && current) return { updatedAt: current.updatedAt, changed: false };
         const actor = await tx.user.findUnique({ where: { email: profile.email }, select: { id: true } });
+        const auditEvents: Prisma.AuditEventCreateManyInput[] = [];
         for (const change of changedRequests) {
           const request = change.after;
           const previous = change.before;
           const isStatusChange = previous?.status !== undefined && previous.status !== request.status;
-          await tx.auditEvent.create({ data: {
+          auditEvents.push({
             actorId: actor?.id,
             action: previous ? (isStatusChange ? "PROTOTYPE_REQUEST_STATUS_CHANGED" : "PROTOTYPE_REQUEST_UPDATED") : "PROTOTYPE_REQUEST_CREATED",
             entityType: "PrototypeRequest",
             entityId: request.id,
-            before: previous ? requestAuditSummary(previous) : undefined,
-            after: requestAuditSummary(request),
-          } });
+            before: previous ? requestAuditSummary(previous) as Prisma.InputJsonValue : undefined,
+            after: requestAuditSummary(request) as Prisma.InputJsonValue,
+          });
         }
         for (const section of changedConfigSections) {
-          await tx.auditEvent.create({ data: {
+          auditEvents.push({
             actorId: actor?.id,
             action: "PROTOTYPE_CONFIGURATION_UPDATED",
             entityType: "PrototypeConfiguration",
             entityId: section,
-            before: { values: existingMasterData.success ? existingMasterData.data[section] ?? {} : {} },
-            after: { values: parsed.data.masterData[section] ?? {} },
-          } });
+            before: { values: existingMasterData.success ? existingMasterData.data[section] ?? {} : {} } as Prisma.InputJsonValue,
+            after: { values: parsed.data.masterData[section] ?? {} } as Prisma.InputJsonValue,
+          });
         }
+        if (auditEvents.length) await tx.auditEvent.createMany({ data: auditEvents });
         const savedWorkspace = await tx.prototypeWorkspace.upsert({
           where: { id: "default" },
           create: { id: "default", requests: Array.from(rowsById.values()), masterData },
@@ -199,7 +202,7 @@ export async function PUT(request: Request) {
           select: { updatedAt: true },
         });
         return { ...savedWorkspace, changed: true };
-      }, { isolationLevel: "Serializable" });
+      }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 15_000 });
       break;
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("INVALID_ACCOUNT_PROJECT:")) {
