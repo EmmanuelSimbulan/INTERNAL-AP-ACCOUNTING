@@ -663,6 +663,7 @@ export function PrototypeApp() {
               rows={rows}
               open={open}
               create={() => setView("new")}
+              showAll={() => setView("queue")}
               notify={notify}
             />
           )}{" "}
@@ -714,14 +715,17 @@ function Dashboard({
   rows,
   open,
   create,
+  showAll,
   notify,
 }: {
   role: Role;
   rows: Req[];
   open: (x: string) => void;
   create: () => void;
+  showAll: () => void;
   notify: (message: string) => void;
 }) {
+  const recentRows = [...rows].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
   const bulkBills = rows.filter(
     (request) =>
       ![
@@ -775,11 +779,13 @@ function Dashboard({
             <div>
               <span className="module-kicker">Workspace</span>
               <h2>Recent requests</h2>
-              <p>Updated across your workspace</p>
+              <p>Latest requests by request date</p>
             </div>
-            <span className="view-chip">{rows.length} total</span>
+            <button type="button" className="show-more-link" onClick={showAll} aria-label={`Show all ${rows.length} requests`}>
+              Show more <span aria-hidden="true">›</span>
+            </button>
           </div>
-          <Table rows={rows} open={open} />
+          <Table rows={recentRows} open={open} />
         </section>
         <aside className="module-rail">
           <section className="card module-card workflow-card">
