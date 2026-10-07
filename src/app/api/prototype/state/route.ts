@@ -63,6 +63,7 @@ const masterDataSchema = z.object({
   projects: z.array(z.string().trim().min(1).max(200)).min(1).max(500),
   accounts: z.array(z.string().trim().min(1).max(200)).min(1).max(500),
   payees: z.array(z.string().trim().min(1).max(300)).min(1).max(1_000),
+  vendorCurrencies: z.record(z.string().max(300), z.enum(["PHP", "USD", "BOTH"])).optional().default({}),
   natureOfPayments: z.array(z.string().trim().min(1).max(500)).min(1).max(200).optional(),
   workflows: z.record(z.string(), workflowControlSchema).optional().default({}),
 });

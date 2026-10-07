@@ -156,13 +156,15 @@ const projects = [
     "Office Supplies",
     "Professional Fees",
   ];
-type MasterData = { projects: string[]; accounts: string[]; payees: string[]; natureOfPayments: string[]; workflows: Record<string, WorkflowControl> };
+type VendorCurrency = "PHP" | "USD" | "BOTH";
+type MasterData = { projects: string[]; accounts: string[]; payees: string[]; vendorCurrencies: Record<string, VendorCurrency>; natureOfPayments: string[]; workflows: Record<string, WorkflowControl> };
 const defaultWorkflow: WorkflowControl = { managerApproval: true, accountingReview: true, accountingThreshold: "", requireApValidation: true, slaHours: 48, diagram: clonePrototypeDiagram() };
 const defaultWorkflows = Object.fromEntries(defaultNatureOfPayments.map((nature) => [nature, { ...defaultWorkflow, diagram: clonePrototypeDiagram() }]));
 const defaultMasterData: MasterData = {
   projects: [...projects],
   accounts: [...accounts],
   payees: ["Northstar Demo Supplies", "Bluebird Sample Consulting", "Alex Rivera", "Demo Payroll Clearing", "Sample Mobile Recipient", "Atlas Demo Services"],
+  vendorCurrencies: Object.fromEntries(["Northstar Demo Supplies", "Bluebird Sample Consulting", "Alex Rivera", "Demo Payroll Clearing", "Sample Mobile Recipient", "Atlas Demo Services"].map((payee) => [payee, "BOTH"])),
   natureOfPayments: defaultNatureOfPayments,
   workflows: defaultWorkflows,
 };
@@ -173,9 +175,18 @@ function usesLegacyDefaultRoute(diagram?: PrototypeWorkflowDiagram) {
 }
 function normalizeMasterData(value: Partial<MasterData>): MasterData {
   const savedWorkflows = value.workflows ?? {};
+  const payees = value.payees ?? defaultMasterData.payees;
+  const vendorCurrencies = Object.fromEntries(payees.map((payee) => {
+    const currency = value.vendorCurrencies?.[payee];
+    return [payee, currency === "PHP" || currency === "USD" || currency === "BOTH" ? currency : "BOTH"];
+  })) as Record<string, VendorCurrency>;
   const natureOfPayments = value.natureOfPayments?.length ? value.natureOfPayments : defaultNatureOfPayments;
   const workflows = Object.fromEntries(natureOfPayments.map((nature) => { const saved = savedWorkflows[nature]; const migrateDefault = usesLegacyDefaultRoute(saved?.diagram); return [nature, { ...defaultWorkflow, ...(saved ?? {}), ...(migrateDefault ? { accountingReview: true } : {}), diagram: migrateDefault ? clonePrototypeDiagram() : normalizePrototypeDiagram(saved?.diagram) }]; }));
-  return { projects: value.projects ?? defaultMasterData.projects, accounts: value.accounts ?? defaultMasterData.accounts, payees: value.payees ?? defaultMasterData.payees, natureOfPayments, workflows };
+  return { projects: value.projects ?? defaultMasterData.projects, accounts: value.accounts ?? defaultMasterData.accounts, payees, vendorCurrencies, natureOfPayments, workflows };
+}
+function isVendorCurrencyAllowed(payee: string, currency: string, vendorCurrencies: MasterData["vendorCurrencies"]) {
+  const allowedCurrency = vendorCurrencies[payee] ?? "BOTH";
+  return allowedCurrency === "BOTH" || allowedCurrency === currency;
 }
 const companies = companyNumberingRules.map((rule) => rule.name);
 /* Demo-only sample requests are intentionally excluded from the UAT workspace.
@@ -690,6 +701,7 @@ export function PrototypeApp() {
               projectCodes={masterData.projects}
               accountOptions={masterData.accounts}
               payeeOptions={masterData.payees}
+              vendorCurrencies={masterData.vendorCurrencies}
               natureOptions={masterData.natureOfPayments}
               workflows={masterData.workflows}
               save={(r) => {
@@ -710,6 +722,7 @@ export function PrototypeApp() {
               projectCodes={masterData.projects}
               accountOptions={masterData.accounts}
               payeeOptions={masterData.payees}
+              vendorCurrencies={masterData.vendorCurrencies}
               natureOptions={masterData.natureOfPayments}
               workflows={masterData.workflows}
             />
@@ -1072,6 +1085,7 @@ function NewRequest({
   projectCodes,
   accountOptions,
   payeeOptions,
+  vendorCurrencies,
   natureOptions,
   workflows,
 }: {
@@ -1079,6 +1093,7 @@ function NewRequest({
   projectCodes: string[];
   accountOptions: string[];
   payeeOptions: string[];
+  vendorCurrencies: MasterData["vendorCurrencies"];
   natureOptions: string[];
   workflows: MasterData["workflows"];
 }) {
@@ -1102,6 +1117,7 @@ function NewRequest({
         amount: "",
       },
     ]);
+  const applicablePayees = payeeOptions.filter((option) => isVendorCurrencyAllowed(option, currency, vendorCurrencies));
   const numberingRule = getCompanyNumberingRule(company);
   useEffect(() => {
     let active = true;
@@ -1164,7 +1180,7 @@ function NewRequest({
     },
     done = async (submit: boolean) => {
       const errors = submit
-        ? getPrototypeRequestErrors(payee, nature, lines)
+        ? [...getPrototypeRequestErrors(payee, nature, lines), ...(!isVendorCurrencyAllowed(payee, currency, vendorCurrencies) ? ["Choose a vendor available for the selected currency."] : [])]
         : [];
       setValidationErrors(errors);
       if (errors.length) {
@@ -1258,7 +1274,7 @@ function NewRequest({
               onChange={(event) => setPayee(event.target.value)}
             >
               <option value="">Select a payee</option>
-              {payeeOptions.map((option) => (
+              {applicablePayees.map((option) => (
                 <option key={option} value={option}>
                   {option}
                 </option>
@@ -1268,7 +1284,11 @@ function NewRequest({
           <Field label="CURRENCY">
             <select
               value={currency}
-              onChange={(e) => setCurrency(e.target.value)}
+              onChange={(e) => {
+                const nextCurrency = e.target.value;
+                setCurrency(nextCurrency);
+                if (payee && !isVendorCurrencyAllowed(payee, nextCurrency, vendorCurrencies)) setPayee("");
+              }}
             >
               <option>PHP</option>
               <option>USD</option>
@@ -1463,6 +1483,7 @@ function Details({
   projectCodes,
   accountOptions,
   payeeOptions,
+  vendorCurrencies,
   natureOptions,
   workflows,
 }: {
@@ -1474,6 +1495,7 @@ function Details({
   projectCodes: string[];
   accountOptions: string[];
   payeeOptions: string[];
+  vendorCurrencies: MasterData["vendorCurrencies"];
   natureOptions: string[];
   workflows: MasterData["workflows"];
 }) {
@@ -1482,6 +1504,7 @@ function Details({
   const [editing, setEditing] = useState(false);
   const [editReason, setEditReason] = useState("");
   const [draft, setDraft] = useState(() => ({ payee: request.payee, currency: request.currency, nature: request.nature, other: request.other, lines: request.lines.map((line) => ({ ...line })), documents: [...request.documents] }));
+  const applicablePayees = payeeOptions.filter((option) => isVendorCurrencyAllowed(option, draft.currency, vendorCurrencies));
   const requesterRevision = role === "Requester" && ["Draft", "Returned for Revision"].includes(request.status);
   const operationalEditor = ["Approver", "AP Processor", "AP Reviewer", "Administrator"].includes(role);
   const canEdit = requesterRevision || operationalEditor;
@@ -1502,6 +1525,7 @@ function Details({
   const saveEdits = (resubmit: boolean) => {
     const validationErrors = getPrototypeRequestErrors(draft.payee, draft.nature, draft.lines);
     if (validationErrors.length) { notify(validationErrors[0]); return; }
+    if (!isVendorCurrencyAllowed(draft.payee, draft.currency, vendorCurrencies)) { notify("Choose a vendor available for the selected currency."); return; }
     if (operationalEditor && !editReason.trim()) { notify("Enter an edit reason for the audit timeline"); return; }
     const event = requesterRevision ? (resubmit ? "Requester revised fields and resubmitted" : "Requester saved revised draft") : `${role} edited request data · ${editReason.trim()}`;
     const approval = resolvePrototypeApproval(draft.nature, total(draft.lines), workflows);
@@ -1579,7 +1603,7 @@ function Details({
       </div>
       {editing && <section className="paper request-editor">
         <div className="form-head"><div><span className="eyebrow">{requesterRevision ? "Revision workspace" : "Controlled AP edit"}</span><h2>{requesterRevision ? "Revise returned request" : "Edit request data and descriptions"}</h2><p className="muted">Every saved change is recorded in the immutable timeline.</p></div><button className="icon-button" aria-label="Close editor" onClick={() => setEditing(false)}>×</button></div>
-        <div className="grid grid-2"><Field label="PAYEE"><input list="edit-request-payees" value={draft.payee} onChange={(event) => setDraft((current) => ({ ...current, payee: event.target.value }))}/><datalist id="edit-request-payees">{payeeOptions.map((option) => <option key={option} value={option}/>)}</datalist></Field><Field label="CURRENCY"><select value={draft.currency} onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value }))}><option>PHP</option><option>USD</option></select></Field></div><div className="section"><Field label="NATURE OF PAYMENT"><NaturePicker value={draft.nature} options={natureOptions} onChange={(nature) => setDraft((current) => ({ ...current, nature, other: "" }))}/></Field></div>
+        <div className="grid grid-2"><Field label="PAYEE"><select value={draft.payee} onChange={(event) => setDraft((current) => ({ ...current, payee: event.target.value }))}><option value="">Select a payee</option>{applicablePayees.map((option) => <option key={option} value={option}>{option}</option>)}</select></Field><Field label="CURRENCY"><select value={draft.currency} onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value, payee: isVendorCurrencyAllowed(current.payee, event.target.value, vendorCurrencies) ? current.payee : "" }))}><option>PHP</option><option>USD</option></select></Field></div><div className="section"><Field label="NATURE OF PAYMENT"><NaturePicker value={draft.nature} options={natureOptions} onChange={(nature) => setDraft((current) => ({ ...current, nature, other: "" }))}/></Field></div>
         <h2 className="section">Request line items</h2>
         {draft.lines.map((line, index) => <div className="line-grid" key={index}><Field label="PROJECT CODE"><select value={line.project} onChange={(event) => changeDraftLine(index, "project", event.target.value)}>{projectCodes.map((project) => <option key={project}>{project}</option>)}</select></Field><Field label="ACCOUNT"><select value={line.account} onChange={(event) => changeDraftLine(index, "account", event.target.value)}><option value="">Accounting to complete</option>{accountOptions.map((account) => <option key={account}>{account}</option>)}</select></Field><Field label="PARTICULARS / DESCRIPTION"><textarea value={line.particulars} onChange={(event) => changeDraftLine(index, "particulars", event.target.value)}/></Field><Field label="AMOUNT"><input inputMode="decimal" value={line.amount} onChange={(event) => changeDraftLine(index, "amount", event.target.value)}/></Field><button className="button secondary" disabled={draft.lines.length === 1} onClick={() => setDraft((current) => ({ ...current, lines: current.lines.filter((_, lineIndex) => lineIndex !== index) }))}>×</button></div>)}
         <div className="editor-toolbar"><button className="button secondary" onClick={() => setDraft((current) => ({ ...current, lines: [...current.lines, { project: projectCodes[0] ?? "", account: "", particulars: "", amount: "" }] }))}>+ Add line</button><strong>Total: {cash(total(draft.lines), draft.currency)}</strong></div>
@@ -1840,7 +1864,15 @@ function Settings({
     }
   }, [masterData.natureOfPayments, workflowNature]);
   const updateList = (key: "projects" | "accounts" | "payees", values: string[]) =>
-    onChange((current) => ({ ...current, [key]: values }));
+    onChange((current) => ({
+      ...current,
+      [key]: values,
+      ...(key === "payees" ? { vendorCurrencies: Object.fromEntries(values.map((payee) => [payee, current.vendorCurrencies[payee] ?? "BOTH"])) } : {}),
+    }));
+  const updateVendorCurrency = (payee: string, currency: VendorCurrency) => {
+    onChange((current) => ({ ...current, vendorCurrencies: { ...current.vendorCurrencies, [payee]: currency } }));
+    notify(`${payee} currency availability updated`);
+  };
   const updateNatureOptions = (values: string[]) => onChange((current) => {
     const removed = current.natureOfPayments.filter((nature) => !values.includes(nature));
     const added = values.filter((nature) => !current.natureOfPayments.includes(nature));
@@ -1925,9 +1957,11 @@ function Settings({
           icon="V"
           title="Payees / Vendors"
           singular="payee or vendor"
-          description="Maintains approved recipients for payment requests."
+          description="Choose which currency each vendor accepts. Both keeps them available for PHP and USD requests."
           values={masterData.payees}
           onChange={(values) => updateList("payees", values)}
+          vendorCurrencies={masterData.vendorCurrencies}
+          onVendorCurrencyChange={updateVendorCurrency}
           notify={notify}
         />
         <MasterDataEditor
@@ -2058,6 +2092,8 @@ function MasterDataEditor({
   onChange,
   notify,
   allowEdit = true,
+  vendorCurrencies,
+  onVendorCurrencyChange,
 }: {
   icon: string;
   title: string;
@@ -2067,6 +2103,8 @@ function MasterDataEditor({
   onChange: (values: string[]) => void;
   notify: (message: string) => void;
   allowEdit?: boolean;
+  vendorCurrencies?: MasterData["vendorCurrencies"];
+  onVendorCurrencyChange?: (payee: string, currency: VendorCurrency) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<number | null>(null);
@@ -2119,7 +2157,7 @@ function MasterDataEditor({
       </div>
       <div className="master-list">
         {values.map((value, index) => (
-          <div className={`master-row ${editing === index ? "editing" : ""}`} key={`${value}-${index}`}>
+          <div className={`master-row ${vendorCurrencies ? "vendor-master-row" : ""} ${editing === index ? "editing" : ""}`} key={`${value}-${index}`}>
             {editing === index ? (
               <input
                 autoFocus
@@ -2132,6 +2170,7 @@ function MasterDataEditor({
                 aria-label={`Edit ${value}`}
               />
             ) : <span>{value}</span>}
+            {vendorCurrencies && onVendorCurrencyChange && <select aria-label={`Currency availability for ${value}`} value={vendorCurrencies[value] ?? "BOTH"} onChange={(event) => onVendorCurrencyChange(value, event.target.value as VendorCurrency)}><option value="PHP">PHP only</option><option value="USD">USD only</option><option value="BOTH">PHP &amp; USD</option></select>}
             <div className="master-row-actions">
               {editing === index ? <>
                 <button type="button" onClick={() => saveEdit(index)}>Save</button>

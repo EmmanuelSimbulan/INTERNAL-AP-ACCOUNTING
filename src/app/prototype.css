@@ -2468,6 +2468,17 @@
 .master-row:hover { background: #f8f9fb; }
 .master-row.editing { background: #f4f8ff; }
 .master-row > span { overflow-wrap: anywhere; }
+.master-row.vendor-master-row { grid-template-columns: minmax(0, 1fr) 112px auto; }
+.master-row.vendor-master-row select {
+  min-width: 0;
+  padding: 7px 22px 7px 8px;
+  border: 1px solid #d9dce2;
+  border-radius: 9px;
+  color: var(--ink);
+  background: #fff;
+  font: inherit;
+  font-size: .7rem;
+}
 .master-row-actions { display: flex; gap: 2px; }
 .master-row-actions button {
   padding: 6px 7px;
