@@ -902,7 +902,7 @@ function Queue({
   rows: Req[];
   open: (x: string) => void;
 }) {
-  const filtered =
+  const queueRows =
     role === "Approver"
       ? rows.filter((r) => r.status === "Pending Manager Approval")
       : role.includes("AP")
@@ -916,6 +916,21 @@ function Queue({
               ].includes(r.status),
           )
         : rows;
+  const [search, setSearch] = useState("");
+  const [company, setCompany] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [status, setStatus] = useState("");
+  const companies = [...new Set(queueRows.map((request) => request.company).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const statuses = [...new Set(queueRows.map((request) => request.status))].sort((a, b) => a.localeCompare(b));
+  const query = search.trim().toLocaleLowerCase();
+  const filtered = queueRows.filter((request) => {
+    const matchesSearch = !query || [request.number, request.requester, request.payee, request.nature, request.invoiceNumber, request.company].some((value) => value?.toLocaleLowerCase().includes(query));
+    const requestDate = request.date.slice(0, 10);
+    return matchesSearch && (!company || request.company === company) && (!fromDate || requestDate >= fromDate) && (!toDate || requestDate <= toDate) && (!status || request.status === status);
+  });
+  const hasFilters = Boolean(search || company || fromDate || toDate || status);
+  const clearFilters = () => { setSearch(""); setCompany(""); setFromDate(""); setToDate(""); setStatus(""); };
   return (
     <>
       <span className="eyebrow">Action queue</span>
@@ -926,6 +941,36 @@ function Queue({
             ? "AP Work Queue"
             : "My Requests"}
       </h1>
+      <section className="request-filters" aria-label="Filter AP requests">
+        <label className="request-filter search-filter">
+          <span>Search requests</span>
+          <input type="search" placeholder="Request number, payee, requester…" value={search} onChange={(event) => setSearch(event.target.value)} />
+        </label>
+        <label className="request-filter">
+          <span>Company</span>
+          <select value={company} onChange={(event) => setCompany(event.target.value)}>
+            <option value="">All companies</option>
+            {companies.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </label>
+        <label className="request-filter">
+          <span>From date</span>
+          <input type="date" value={fromDate} max={toDate || undefined} onChange={(event) => setFromDate(event.target.value)} />
+        </label>
+        <label className="request-filter">
+          <span>To date</span>
+          <input type="date" value={toDate} min={fromDate || undefined} onChange={(event) => setToDate(event.target.value)} />
+        </label>
+        <label className="request-filter">
+          <span>Status</span>
+          <select value={status} onChange={(event) => setStatus(event.target.value)}>
+            <option value="">All statuses</option>
+            {statuses.map((value) => <option key={value} value={value}>{value}</option>)}
+          </select>
+        </label>
+        {hasFilters && <button type="button" className="clear-request-filters" onClick={clearFilters}>Clear filters</button>}
+        <p className="request-filter-count">Showing {filtered.length} of {queueRows.length} requests</p>
+      </section>
       <Table rows={filtered} open={open} />
     </>
   );
@@ -937,6 +982,7 @@ function Table({ rows, open }: { rows: Req[]; open: (x: string) => void }) {
         <thead>
           <tr>
             <th>Request</th>
+            <th>Company</th>
             <th>Requester / Payee</th>
             <th>Type</th>
             <th>Total</th>
@@ -945,12 +991,13 @@ function Table({ rows, open }: { rows: Req[]; open: (x: string) => void }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
+          {rows.length === 0 ? <tr><td className="empty-requests" colSpan={7}>No AP requests match these filters.</td></tr> : rows.map((r) => (
             <tr key={r.id} onClick={() => open(r.id)}>
               <td>
                 <strong>{r.number}</strong>
                 <div className="fine">{r.date}</div>
               </td>
+              <td>{r.company}</td>
               <td>
                 {r.requester}
                 <div className="fine">{r.payee}</div>

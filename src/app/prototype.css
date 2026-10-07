@@ -458,6 +458,64 @@
   color: var(--p-secondary);
   margin: 4px 0 0;
 }
+.request-filters {
+  display: grid;
+  grid-template-columns: minmax(230px, 2fr) repeat(4, minmax(135px, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  margin: 20px 0 14px;
+  padding: 16px;
+  border: 1px solid rgba(0, 0, 0, .055);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, .76);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .025);
+}
+.request-filter { min-width: 0; display: grid; gap: 7px; }
+.request-filter > span {
+  color: #74747a;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+}
+.prototype .request-filter input,
+.prototype .request-filter select {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  padding: 0 11px;
+  border: 1px solid rgba(28, 43, 68, .13);
+  border-radius: 10px;
+  outline: 0;
+  background: rgba(255, 255, 255, .9);
+  color: var(--p-text);
+  font: inherit;
+  font-size: 12px;
+}
+.prototype .request-filter input:focus,
+.prototype .request-filter select:focus {
+  border-color: rgba(0, 113, 227, .55);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, .1);
+}
+.clear-request-filters {
+  height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--p-blue);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.clear-request-filters:hover { background: rgba(0, 113, 227, .07); }
+.request-filter-count {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--p-secondary);
+  font-size: 11px;
+}
 .prototype .table-wrap {
   border: 0;
   border-radius: 20px;
@@ -492,6 +550,7 @@
 .prototype tbody tr:last-child td {
   border-bottom: 0;
 }
+.prototype .empty-requests { padding: 38px 18px; color: var(--p-secondary); text-align: center; }
 .prototype td strong {
   font-weight: 640;
 }
@@ -2408,6 +2467,8 @@
   }
 }
 @media (max-width: 980px) {
+  .request-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .request-filter.search-filter { grid-column: span 2; }
   .prototype {
     padding: 10px;
   }
@@ -2491,6 +2552,8 @@
   }
 }
 @media (max-width: 650px) {
+  .request-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; }
+  .request-filter.search-filter { grid-column: 1 / -1; }
   .proto-top {
     height: auto;
   }
