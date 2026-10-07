@@ -2542,10 +2542,11 @@
 .account-project-heading span { color: var(--muted); font-size: .72rem; }
 .account-project-actions { justify-content: flex-start; margin: 10px 0; }
 .account-project-actions button { border: 0; background: transparent; color: #0066cc; font: inherit; font-size: .75rem; cursor: pointer; }
-.account-project-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 10px 0 14px; }
-.account-project-options label { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid #e6e9ee; border-radius: 9px; color: var(--ink); font-size: .78rem; cursor: pointer; }
+.account-project-options { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 14px; }
+.account-project-options label { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; justify-content: start; gap: 10px; width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #e6e9ee; border-radius: 9px; color: var(--ink); font-size: .78rem; text-align: left; cursor: pointer; }
 .account-project-options label:has(input:checked) { border-color: #9fc9f3; background: #f2f8ff; }
-.account-project-options input { accent-color: #0878d1; }
+.account-project-options input[type="checkbox"] { justify-self: start; width: 16px; min-width: 16px; height: 16px; margin: 0; padding: 0; border: 0; border-radius: 4px; accent-color: #0878d1; cursor: pointer; }
+.account-project-help { margin: 0 0 12px; color: var(--muted); font-size: .72rem; line-height: 1.5; }
 .settings-footnote {
   margin: 18px 0 0;
   color: var(--muted);

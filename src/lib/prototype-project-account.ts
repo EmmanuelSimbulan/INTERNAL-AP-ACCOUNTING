@@ -8,7 +8,10 @@ export function accountIsApplicable(
 ) {
   if (!account) return true;
   if (!mapping) return legacyDefault;
-  return mapping[account]?.includes(project) ?? false;
+  const normalizedAccount = account.trim().toLocaleLowerCase();
+  const normalizedProject = project.trim().toLocaleLowerCase();
+  const assignedProjects = mapping[account] ?? Object.entries(mapping).find(([name]) => name.trim().toLocaleLowerCase() === normalizedAccount)?.[1];
+  return assignedProjects?.some((assignedProject) => assignedProject.trim().toLocaleLowerCase() === normalizedProject) ?? false;
 }
 
 export function getApplicableAccounts(
