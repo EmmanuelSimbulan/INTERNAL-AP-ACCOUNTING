@@ -80,6 +80,21 @@ const stateSchema = z.object({
   masterData: masterDataSchema,
 });
 
+function requestAuditSummary(row: z.infer<typeof requestSchema>) {
+  return {
+    number: row.number,
+    status: row.status,
+    company: row.company,
+    payee: row.payee,
+    currency: row.currency,
+    nature: row.nature,
+    invoiceNumber: row.invoiceNumber ?? null,
+    total: row.lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0),
+    lines: row.lines.map(({ project, account, particulars, amount }) => ({ project, account, particulars, amount })),
+    supportingDocumentCount: row.documents.length,
+  };
+}
+
 export async function GET() {
   const workspace = await db.prototypeWorkspace.findUnique({
     where: { id: "default" },
@@ -141,13 +156,49 @@ export async function PUT(request: Request) {
             }
           }
         }
-        for (const row of parsed.data.rows) rowsById.set(row.id, row);
-        return tx.prototypeWorkspace.upsert({
+        const changedRequests = parsed.data.rows.flatMap((row) => {
+          const before = baselineRows.get(row.id);
+          if (before && JSON.stringify(before) === JSON.stringify(row)) return [];
+          rowsById.set(row.id, row);
+          return [{ before, after: row }];
+        });
+        const configSections = ["projects", "accounts", "accountProjectCodes", "payees", "vendorCurrencies", "natureOfPayments", "workflows"] as const;
+        const changedConfigSections = profile.role === "Administrator"
+          ? configSections.filter((section) => JSON.stringify(existingMasterData.success ? existingMasterData.data[section] : undefined) !== JSON.stringify(parsed.data.masterData[section]))
+          : [];
+        const hasChanges = !current || changedRequests.length > 0 || changedConfigSections.length > 0;
+        if (!hasChanges && current) return { updatedAt: current.updatedAt, changed: false };
+        const actor = await tx.user.findUnique({ where: { email: profile.email }, select: { id: true } });
+        for (const change of changedRequests) {
+          const request = change.after;
+          const previous = change.before;
+          const isStatusChange = previous?.status !== undefined && previous.status !== request.status;
+          await tx.auditEvent.create({ data: {
+            actorId: actor?.id,
+            action: previous ? (isStatusChange ? "PROTOTYPE_REQUEST_STATUS_CHANGED" : "PROTOTYPE_REQUEST_UPDATED") : "PROTOTYPE_REQUEST_CREATED",
+            entityType: "PrototypeRequest",
+            entityId: request.id,
+            before: previous ? requestAuditSummary(previous) : undefined,
+            after: requestAuditSummary(request),
+          } });
+        }
+        for (const section of changedConfigSections) {
+          await tx.auditEvent.create({ data: {
+            actorId: actor?.id,
+            action: "PROTOTYPE_CONFIGURATION_UPDATED",
+            entityType: "PrototypeConfiguration",
+            entityId: section,
+            before: { values: existingMasterData.success ? existingMasterData.data[section] ?? {} : {} },
+            after: { values: parsed.data.masterData[section] ?? {} },
+          } });
+        }
+        const savedWorkspace = await tx.prototypeWorkspace.upsert({
           where: { id: "default" },
           create: { id: "default", requests: Array.from(rowsById.values()), masterData },
           update: { requests: Array.from(rowsById.values()), masterData },
           select: { updatedAt: true },
         });
+        return { ...savedWorkspace, changed: true };
       }, { isolationLevel: "Serializable" });
       break;
     } catch (error) {

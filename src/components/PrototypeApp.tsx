@@ -451,13 +451,14 @@ export function PrototypeApp() {
     [rows, setRows] = useState<Req[]>([]),
     [selected, setSelected] = useState(""),
     [view, setView] = useState<
-      "dashboard" | "new" | "detail" | "queue" | "reports" | "settings"
+      "dashboard" | "new" | "detail" | "queue" | "reports" | "settings" | "audit"
     >("dashboard"),
     [toast, setToast] = useState(""),
     [databaseHydrated, setDatabaseHydrated] = useState(false),
     [syncStatus, setSyncStatus] = useState<"loading" | "saving" | "synced" | "offline">("loading"),
     [syncError, setSyncError] = useState("");
   const serverUpdatedAtRef = useRef<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
   const applyingRemoteStateRef = useRef(false);
   const syncStatusRef = useRef(syncStatus);
   syncStatusRef.current = syncStatus;
@@ -518,11 +519,12 @@ export function PrototypeApp() {
           body: JSON.stringify({ profileId: activeProfileId, rows: databaseRows, masterData }),
         });
         if (!response.ok) throw new Error(`Database returned ${response.status}`);
-        const saved = await response.json() as { updatedAt?: string };
+        const saved = await response.json() as { updatedAt?: string; changed?: boolean };
         if (!saved.updatedAt) throw new Error("Database did not confirm the save");
         serverUpdatedAtRef.current = saved.updatedAt;
         setSyncError("");
         setSyncStatus("synced");
+        if (saved.changed) notify("All changes saved");
       } catch (error) {
         console.error("Prototype database save failed", error);
         setSyncError("The latest changes were not saved. Reconnect to load the last saved data.");
@@ -592,7 +594,8 @@ export function PrototypeApp() {
     },
     notify = (m: string) => {
       setToast(m);
-      setTimeout(() => setToast(""), 2200);
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = window.setTimeout(() => setToast(""), 2800);
     },
     open = (id: string) => {
       setSelected(id);
@@ -660,6 +663,14 @@ export function PrototypeApp() {
                 Settings
               </button>
             )}
+            {(role === "Administrator" || role === "Auditor" || role === "AP Processor" || role === "AP Reviewer") && (
+              <button
+                className={view === "audit" ? "active" : ""}
+                onClick={() => setView("audit")}
+              >
+                Audit trail
+              </button>
+            )}
           </nav>
           <div className="proto-tools">
             <span className={`sync-indicator ${syncStatus}`} title="Production database status">
@@ -688,7 +699,7 @@ export function PrototypeApp() {
         </div>
       </header>
       <main className="proto-main">
-        {toast && <div className="toast">{toast}</div>}
+        {toast && <div className="toast" role="status" aria-live="polite">{toast}</div>}
         {syncStatus === "offline" && <div className="database-warning" role="alert"><span>{syncError || "The shared database is unavailable. Changes will not be saved. Reconnecting reloads the last saved version."}</span><button type="button" className="button secondary" onClick={() => void reconnectDatabase()}>Reconnect to database</button></div>}
         <div className="view-stage" key={`${view}-${selected}`} inert={syncStatus === "offline" || syncStatus === "loading"}>
           {view === "dashboard" && (
@@ -737,6 +748,7 @@ export function PrototypeApp() {
             />
           )}{" "}
           {view === "reports" && <Reports rows={rows} />}
+          {view === "audit" && <AuditTrail profileId={activeProfileId} />}
           {view === "settings" && role === "Administrator" && (
             <Settings
               masterData={masterData}
@@ -2323,6 +2335,43 @@ function MasterDataEditor({
       </div>
     </section>
   );
+}
+
+type PrototypeAuditRecord = {
+  id: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  before: unknown;
+  after: unknown;
+  createdAt: string;
+  actor: { fullName: string; email: string } | null;
+};
+
+function AuditTrail({ profileId }: { profileId: string }) {
+  const [events, setEvents] = useState<PrototypeAuditRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    void fetch(`/api/prototype/audit?profileId=${encodeURIComponent(profileId)}`, { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(response.status === 403 ? "Your profile cannot view the audit trail." : "Could not load the audit trail.");
+        return response.json() as Promise<PrototypeAuditRecord[]>;
+      })
+      .then((saved) => { if (active) setEvents(saved); })
+      .catch((cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "Could not load the audit trail."); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [profileId]);
+  const summarize = (value: unknown) => value == null ? "—" : JSON.stringify(value);
+  return <>
+    <section className="settings-hero"><div><span className="eyebrow">Governance</span><h1>Audit trail</h1><p className="muted">A read-only record of saved request and configuration changes. Showing the latest 200 events.</p></div><span className="badge green">Read only</span></section>
+    {error && <div className="database-warning" role="alert">{error}</div>}
+    <section className="card section audit-trail-card"><div className="section-heading"><div><h2>Recent activity</h2><p>{events.length} recorded event{events.length === 1 ? "" : "s"}</p></div></div>
+      {loading ? <p className="muted">Loading audit events…</p> : !events.length ? <p className="muted">No saved request or configuration changes have been recorded yet.</p> : <div className="table-wrap"><table><thead><tr><th>Date and time</th><th>Who</th><th>Action</th><th>Record</th><th>Change summary</th></tr></thead><tbody>{events.map((event) => <tr key={event.id}><td>{new Date(event.createdAt).toLocaleString()}</td><td>{event.actor?.fullName ?? "Unknown user"}</td><td>{event.action.replaceAll("_", " ").toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase())}</td><td>{event.entityType === "PrototypeConfiguration" ? event.entityId : String((event.after as { number?: string } | null)?.number ?? event.entityId)}</td><td className="audit-change-summary"><span>Before: {summarize(event.before)}</span><span>After: {summarize(event.after)}</span></td></tr>)}</tbody></table></div>}
+    </section>
+  </>;
 }
 
 function Reports({ rows }: { rows: Req[] }) {

@@ -72,6 +72,15 @@ export async function GET(request: Request) {
   const workspace = await db.prototypeWorkspace.findUnique({ where: { id: "default" }, select: { masterData: true } });
   const masterData = readMasterData(workspace?.masterData);
   if (!masterData) return NextResponse.json({ error: "Saved configuration data is not available. Reload Settings after the workspace has synced." }, { status: 409 });
+  const profile = demoProfiles.find((item) => item.id === profileId);
+  const actor = profile ? await db.user.findUnique({ where: { email: profile.email }, select: { id: true } }) : null;
+  await db.auditEvent.create({ data: {
+    actorId: actor?.id,
+    action: "PROTOTYPE_CONFIGURATION_EXPORTED",
+    entityType: "PrototypeConfiguration",
+    entityId: type.data,
+    metadata: { recordCount: valuesFor(masterData, type.data).length },
+  } });
   return csvResponse(type.data, masterData);
 }
 
@@ -113,6 +122,16 @@ export async function POST(request: Request) {
           updated.workflows = { ...masterData.workflows, ...Object.fromEntries(additions.map(([name]) => [name, createDefaultPrototypeWorkflowControl()])) };
         }
         await tx.prototypeWorkspace.update({ where: { id: "default" }, data: { masterData: updated as unknown as Prisma.InputJsonValue } });
+        const profile = demoProfiles.find((item) => item.id === profileId);
+        const actor = profile ? await tx.user.findUnique({ where: { email: profile.email }, select: { id: true } }) : null;
+        await tx.auditEvent.create({ data: {
+          actorId: actor?.id,
+          action: "PROTOTYPE_CONFIGURATION_IMPORTED",
+          entityType: "PrototypeConfiguration",
+          entityId: type,
+          before: { recordCount: valuesFor(masterData, type).length },
+          after: { importedRecords: additions.length, records: additions.map(([name]) => name) },
+        } });
         return { preview, importedRecords: additions.length, masterData: updated };
       }, { isolationLevel: "Serializable" });
       return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
