@@ -1887,15 +1887,6 @@ function Settings({
   profileId: string;
 }) {
   const [workflowNature, setWorkflowNature] = useState(masterData.natureOfPayments[0] ?? "");
-  const [configurationSlide, setConfigurationSlide] = useState<PrototypeConfigType>("projects");
-  const configurationSlides: Array<{ type: PrototypeConfigType; title: string; icon: string; count: number }> = [
-    { type: "projects", title: "Project Codes", icon: "P", count: masterData.projects.length },
-    { type: "accounts", title: "Accounts", icon: "A", count: masterData.accounts.length },
-    { type: "payees", title: "Payees / Vendors", icon: "V", count: masterData.payees.length },
-    { type: "natureOfPayments", title: "Nature of Payment", icon: "N", count: masterData.natureOfPayments.length },
-  ];
-  const activeConfigurationIndex = Math.max(0, configurationSlides.findIndex((slide) => slide.type === configurationSlide));
-  const activeConfiguration = configurationSlides[activeConfigurationIndex];
   useEffect(() => {
     if (!masterData.natureOfPayments.includes(workflowNature)) {
       setWorkflowNature(masterData.natureOfPayments[0] ?? "");
@@ -1996,21 +1987,11 @@ function Settings({
           <WorkflowDiagramEditor diagram={workflow.diagram ?? clonePrototypeDiagram()} active={{ manager: workflow.managerApproval, accounting: workflow.accountingReview, ap: workflow.requireApValidation }} trace={diagramTrace} onChange={(diagram) => updateWorkflow({ diagram }, false)} notify={notify}/>
         </div>
       </section>
-      <section className="configuration-slides" aria-labelledby="configuration-slides-title">
-        <div className="configuration-slides-header">
-          <div><span className="eyebrow">Master data</span><h2 id="configuration-slides-title">Configuration</h2><p>Work with one configuration section at a time.</p></div>
-          <span className="badge green">Auto-saved</span>
-        </div>
-        <div className="configuration-slide-toolbar">
-          <button className="button secondary configuration-slide-arrow" type="button" disabled={activeConfigurationIndex === 0} onClick={() => setConfigurationSlide(configurationSlides[activeConfigurationIndex - 1].type)} aria-label="Previous configuration section">‹ <span>Previous</span></button>
-          <div className="configuration-slide-picker field"><label htmlFor="configuration-slide-select">CONFIGURATION SECTION</label><select id="configuration-slide-select" value={configurationSlide} onChange={(event) => setConfigurationSlide(event.target.value as PrototypeConfigType)}>{configurationSlides.map((slide) => <option key={slide.type} value={slide.type}>{slide.title}</option>)}</select></div>
-          <button className="button secondary configuration-slide-arrow" type="button" disabled={activeConfigurationIndex === configurationSlides.length - 1} onClick={() => setConfigurationSlide(configurationSlides[activeConfigurationIndex + 1].type)} aria-label="Next configuration section"><span>Next</span> ›</button>
-        </div>
-        <div className="configuration-slide-progress" role="progressbar" aria-label="Configuration section progress" aria-valuemin={1} aria-valuemax={configurationSlides.length} aria-valuenow={activeConfigurationIndex + 1}><span style={{ width: `${((activeConfigurationIndex + 1) / configurationSlides.length) * 100}%` }}/></div>
-        <div className="configuration-slide-window">
-          {configurationSlides.map((slide) => <section key={slide.type} id={`configuration-panel-${slide.type}`} className={`configuration-slide-panel${slide.type === configurationSlide ? " active" : ""}`} role="tabpanel" aria-label={slide.title} hidden={slide.type !== configurationSlide}>{renderConfigurationEditor(slide.type)}</section>)}
-        </div>
-        <div className="configuration-slide-caption" aria-live="polite"><span className="master-icon">{activeConfiguration.icon}</span><div><strong>{activeConfiguration.title}</strong><small>Slide {activeConfigurationIndex + 1} of {configurationSlides.length} · {activeConfiguration.count} configured</small></div></div>
+      <section className="configuration-sections" aria-label="Master data configuration">
+        {renderConfigurationEditor("projects")}
+        {renderConfigurationEditor("accounts")}
+        {renderConfigurationEditor("payees")}
+        {renderConfigurationEditor("natureOfPayments")}
       </section>
       <p className="settings-footnote">
         Changes save automatically. Workflow changes apply to new submissions and resubmissions; in-progress requests keep their submitted route.
