@@ -161,7 +161,7 @@ function normalizeMasterData(value: Partial<MasterData>): MasterData {
   return { projects: value.projects ?? defaultMasterData.projects, accounts: value.accounts ?? defaultMasterData.accounts, payees: value.payees ?? defaultMasterData.payees, natureOfPayments, workflows };
 }
 const companies = companyNumberingRules.map((rule) => rule.name);
-const demoImagePreview = (title: string) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700"><rect width="1000" height="700" fill="#f5f5f7"/><rect x="90" y="70" width="820" height="560" rx="24" fill="white" stroke="#d9d9de"/><text x="140" y="155" font-family="Arial" font-size="24" font-weight="700" fill="#1d1d1f">SVI Supporting Document</text><text x="140" y="210" font-family="Arial" font-size="18" fill="#6e6e73">${title}</text><path d="M140 275h720M140 330h520M140 385h650M140 440h430" stroke="#d2d2d7" stroke-width="12" stroke-linecap="round"/><circle cx="765" cy="505" r="62" fill="#e8f2ff"/><path d="m735 505 22 22 40-48" fill="none" stroke="#0071e3" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/><text x="140" y="560" font-family="Arial" font-size="16" fill="#86868b">Preview generated for workflow simulation</text></svg>`)}`;
+/* Demo-only sample requests are intentionally excluded from the UAT workspace.
 const seed: Req[] = [
   {
     id: "1",
@@ -400,7 +400,7 @@ const seed: Req[] = [
       "Returned: attach missing receipts",
     ],
   },
-];
+]; */
 const total = (l: Line[]) =>
     l.reduce((sum, line) => {
       const amount = parsePrototypeAmount(line.amount);
@@ -414,14 +414,15 @@ export function PrototypeApp() {
   const [activeProfileId, setActiveProfileId] = useState(demoProfiles[0].id),
     [profileMenuOpen, setProfileMenuOpen] = useState(false),
     [masterData, setMasterData] = useState<MasterData>(defaultMasterData),
-    [rows, setRows] = useState<Req[]>(seed.map(normalizeRequestWorkflow)),
-    [selected, setSelected] = useState("1"),
+    [rows, setRows] = useState<Req[]>([]),
+    [selected, setSelected] = useState(""),
     [view, setView] = useState<
       "dashboard" | "new" | "detail" | "queue" | "reports" | "settings"
     >("dashboard"),
     [toast, setToast] = useState(""),
     [databaseHydrated, setDatabaseHydrated] = useState(false),
-    [syncStatus, setSyncStatus] = useState<"loading" | "saving" | "synced" | "offline">("loading");
+    [syncStatus, setSyncStatus] = useState<"loading" | "saving" | "synced" | "offline">("loading"),
+    [syncError, setSyncError] = useState("");
   const serverUpdatedAtRef = useRef<string | null>(null);
   const applyingRemoteStateRef = useRef(false);
   const syncStatusRef = useRef(syncStatus);
@@ -431,44 +432,23 @@ export function PrototypeApp() {
   useEffect(() => {
     const savedProfile = localStorage.getItem("iap-active-profile");
     if (savedProfile && demoProfiles.some((profile) => profile.id === savedProfile)) setActiveProfileId(savedProfile);
-    const savedMasters = localStorage.getItem("iap-master-data");
-    if (savedMasters) try { const parsed = JSON.parse(savedMasters) as Partial<MasterData>; if (parsed.projects?.length && parsed.accounts?.length && parsed.payees?.length) setMasterData(normalizeMasterData(parsed)); } catch {}
-    const s = localStorage.getItem("iap-demo");
-    if (s)
-      try {
-        const saved = JSON.parse(s) as Array<
-          Omit<Req, "documents"> & { documents: Array<Attachment | string> }
-        >;
-        const normalized = saved.map((request) => normalizeRequestWorkflow({
-          ...request,
-          documents: request.documents.map((document) =>
-            typeof document === "string"
-              ? { name: document, type: "application/octet-stream" }
-              : document,
-          ),
-        }));
-        const savedIds = new Set(normalized.map((request) => request.id));
-        setRows([
-          ...normalized,
-          ...seed.filter((request) => !savedIds.has(request.id)),
-        ]);
-      } catch {}
     const loadDatabaseState = async () => {
       try {
         const response = await fetch("/api/prototype/state", { cache: "no-store" });
         if (!response.ok) throw new Error(`Database returned ${response.status}`);
         const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData>; updatedAt?: string };
         serverUpdatedAtRef.current = saved?.updatedAt ?? null;
-        if (saved?.requests?.length) {
-          setRows(saved.requests.map(normalizeRequestWorkflow));
-          setSelected(saved.requests[0].id);
-        }
-        if (saved?.masterData?.projects?.length && saved.masterData.accounts?.length && saved.masterData.payees?.length) {
-          setMasterData(normalizeMasterData(saved.masterData));
-        }
+        const savedRows = (saved?.requests ?? []).map(normalizeRequestWorkflow);
+        setRows(savedRows);
+        setSelected(savedRows[0]?.id ?? "");
+        setMasterData(saved?.masterData ? normalizeMasterData(saved.masterData) : defaultMasterData);
+        setSyncError("");
         setSyncStatus("synced");
       } catch (error) {
         console.error("Prototype database load failed", error);
+        setRows([]);
+        setSelected("");
+        setSyncError("The shared database could not be reached. Changes will not be saved until you reconnect.");
         setSyncStatus("offline");
       } finally {
         setDatabaseHydrated(true);
@@ -476,21 +456,12 @@ export function PrototypeApp() {
     };
     void loadDatabaseState();
   }, []);
-  useEffect(
-    () => {
-      try { localStorage.setItem("iap-demo", JSON.stringify(rows)); } catch {}
-    },
-    [rows],
-  );
-  useEffect(() => {
-    try { localStorage.setItem("iap-master-data", JSON.stringify(masterData)); } catch {}
-  }, [masterData]);
   useEffect(() => {
     if (applyingRemoteStateRef.current) {
       applyingRemoteStateRef.current = false;
       return;
     }
-    if (!databaseHydrated) return;
+    if (!databaseHydrated || syncStatusRef.current !== "synced") return;
     const profile = demoProfiles.find((item) => item.id === activeProfileId);
     if (profile?.role === "Auditor") {
       setSyncStatus("synced");
@@ -514,10 +485,13 @@ export function PrototypeApp() {
         });
         if (!response.ok) throw new Error(`Database returned ${response.status}`);
         const saved = await response.json() as { updatedAt?: string };
-        if (saved.updatedAt) serverUpdatedAtRef.current = saved.updatedAt;
+        if (!saved.updatedAt) throw new Error("Database did not confirm the save");
+        serverUpdatedAtRef.current = saved.updatedAt;
+        setSyncError("");
         setSyncStatus("synced");
       } catch (error) {
         console.error("Prototype database save failed", error);
+        setSyncError("The latest changes were not saved. Reconnect to load the last saved data.");
         setSyncStatus("offline");
       }
     }, 650);
@@ -532,7 +506,11 @@ export function PrototypeApp() {
       checking = true;
       try {
         const response = await fetch("/api/prototype/state", { cache: "no-store" });
-        if (!response.ok) return;
+        if (!response.ok) {
+          setSyncError("The shared database connection was lost. Reconnect before continuing UAT.");
+          setSyncStatus("offline");
+          return;
+        }
         const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData>; updatedAt?: string };
         if (!active || !saved?.updatedAt || saved.updatedAt === serverUpdatedAtRef.current) return;
         if (syncStatusRef.current !== "synced") return;
@@ -544,6 +522,10 @@ export function PrototypeApp() {
         setMasterData(normalizeMasterData(saved.masterData ?? {}));
       } catch (error) {
         console.error("Prototype database refresh failed", error);
+        if (active) {
+          setSyncError("The shared database connection was lost. Reconnect before continuing UAT.");
+          setSyncStatus("offline");
+        }
       } finally {
         checking = false;
       }
@@ -555,6 +537,25 @@ export function PrototypeApp() {
     };
   }, [databaseHydrated, syncStatus]);
   const current = rows.find((r) => r.id === selected),
+    reconnectDatabase = async () => {
+      setSyncStatus("loading");
+      try {
+        const response = await fetch("/api/prototype/state", { cache: "no-store" });
+        if (!response.ok) throw new Error(`Database returned ${response.status}`);
+        const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData>; updatedAt?: string };
+        const savedRows = (saved?.requests ?? []).map(normalizeRequestWorkflow);
+        serverUpdatedAtRef.current = saved?.updatedAt ?? null;
+        setRows(savedRows);
+        setSelected((selectedId) => savedRows.some((request) => request.id === selectedId) ? selectedId : savedRows[0]?.id ?? "");
+        setMasterData(saved?.masterData ? normalizeMasterData(saved.masterData) : defaultMasterData);
+        setSyncError("");
+        setSyncStatus("synced");
+      } catch (error) {
+        console.error("Prototype database reconnect failed", error);
+        setSyncError("Could not reconnect to the shared database. Your last saved data is unchanged; try again.");
+        setSyncStatus("offline");
+      }
+    },
     notify = (m: string) => {
       setToast(m);
       setTimeout(() => setToast(""), 2200);
@@ -628,20 +629,8 @@ export function PrototypeApp() {
           </nav>
           <div className="proto-tools">
             <span className={`sync-indicator ${syncStatus}`} title="Production database status">
-              <i />{syncStatus === "loading" ? "Connecting" : syncStatus === "saving" ? "Saving" : syncStatus === "synced" ? "Database synced" : "Local fallback"}
+              <i />{syncStatus === "loading" ? "Connecting" : syncStatus === "saving" ? "Saving" : syncStatus === "synced" ? "Database saved" : "Database unavailable"}
             </span>
-            <button
-              className="icon-button"
-              title="Reset demo"
-              aria-label="Reset demo"
-              onClick={() => {
-                localStorage.removeItem("iap-demo");
-                setRows(seed);
-                notify("Demo reset");
-              }}
-            >
-              ↻
-            </button>
             <div className="profile-switcher">
               <button className="profile-trigger" type="button" aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen((open) => !open)}>
                 <span className="profile-avatar" style={{ background: activeProfile.accent }}>{activeProfile.initials}</span>
@@ -666,7 +655,8 @@ export function PrototypeApp() {
       </header>
       <main className="proto-main">
         {toast && <div className="toast">{toast}</div>}
-        <div className="view-stage" key={`${view}-${selected}`}>
+        {syncStatus === "offline" && <div className="database-warning" role="alert"><span>{syncError || "The shared database is unavailable. Changes will not be saved. Reconnecting reloads the last saved version."}</span><button type="button" className="button secondary" onClick={() => void reconnectDatabase()}>Reconnect to database</button></div>}
+        <div className="view-stage" key={`${view}-${selected}`} inert={syncStatus === "offline" || syncStatus === "loading"}>
           {view === "dashboard" && (
             <Dashboard
               role={role}

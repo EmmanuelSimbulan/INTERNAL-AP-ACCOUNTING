@@ -129,6 +129,25 @@
 .sync-indicator.saving i,
 .sync-indicator.loading i { background: #e29a24; box-shadow: 0 0 0 3px rgba(226, 154, 36, .13); }
 .sync-indicator.offline i { background: #d04747; box-shadow: 0 0 0 3px rgba(208, 71, 71, .13); }
+.database-warning {
+  max-width: 1320px;
+  margin: 18px auto 0;
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid rgba(180, 45, 45, .2);
+  border-radius: 14px;
+  background: #fff4f2;
+  color: #7c2424;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.database-warning .button { flex: 0 0 auto; }
+@media (max-width: 640px) {
+  .database-warning { margin: 12px; align-items: stretch; flex-direction: column; }
+}
 .role-control {
   height: 38px;
   display: flex;
