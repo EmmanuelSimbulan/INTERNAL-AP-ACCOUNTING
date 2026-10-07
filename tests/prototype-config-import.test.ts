@@ -42,6 +42,23 @@ describe("prototype configuration CSV import", () => {
     ]);
   });
 
+  it("imports multiple existing Project Code assignments for an account", () => {
+    const result = prototypeConfigImportValues(
+      "accounts",
+      'Account,Applicable Project Codes\r\nTransportation,"Dealership, IT"\r\nOffice Supplies,Unknown\r\n',
+      [],
+      ["Dealership", "IT"],
+    );
+    expect(result.preview).toMatchObject({ validRecords: 1, invalidRecords: 1 });
+    expect(result.projectCodesByValue.get("Transportation")).toEqual(["Dealership", "IT"]);
+  });
+
+  it("continues to accept the legacy one-column account import format", () => {
+    const result = prototypeConfigImportValues("accounts", "Account\r\nOffice Supplies\r\n", []);
+    expect(result.preview.validRecords).toBe(1);
+    expect(result.projectCodesByValue.get("Office Supplies")).toEqual([]);
+  });
+
   it("does not mark malformed CSV or invalid headers as importable", () => {
     const invalidHeaders = previewPrototypeConfigImport("natureOfPayments", "Nature,Status\nSupplies,Active", []);
     const malformed = previewPrototypeConfigImport("accounts", 'Account\n"Unclosed', []);

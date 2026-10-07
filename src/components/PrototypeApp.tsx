@@ -18,6 +18,7 @@ import {
   parsePrototypeAmount,
 } from "@/lib/prototype-validation";
 import { clonePrototypeDiagram, createDefaultPrototypeWorkflowControl, normalizePrototypeDiagram, resolvePrototypeApproval, tracePrototypeDiagram, type PrototypeBranchCondition, type PrototypeWorkflowControl as WorkflowControl, type PrototypeWorkflowDiagram, type PrototypeWorkflowNodeId, type PrototypeWorkflowNodeRole } from "@/lib/prototype-workflow";
+import { accountIsApplicable, getApplicableAccounts, type AccountProjectMap } from "@/lib/prototype-project-account";
 type Status =
   | "Draft"
   | "Pending Manager Approval"
@@ -158,12 +159,13 @@ const projects = [
     "Professional Fees",
   ];
 type VendorCurrency = "PHP" | "USD" | "BOTH";
-type MasterData = { projects: string[]; accounts: string[]; payees: string[]; vendorCurrencies: Record<string, VendorCurrency>; natureOfPayments: string[]; workflows: Record<string, WorkflowControl> };
+type MasterData = { projects: string[]; accounts: string[]; accountProjectCodes: AccountProjectMap; payees: string[]; vendorCurrencies: Record<string, VendorCurrency>; natureOfPayments: string[]; workflows: Record<string, WorkflowControl> };
 const defaultWorkflow: WorkflowControl = createDefaultPrototypeWorkflowControl();
 const defaultWorkflows = Object.fromEntries(defaultNatureOfPayments.map((nature) => [nature, { ...defaultWorkflow, diagram: clonePrototypeDiagram() }]));
 const defaultMasterData: MasterData = {
   projects: [...projects],
   accounts: [...accounts],
+  accountProjectCodes: Object.fromEntries(accounts.map((account) => [account, [...projects]])),
   payees: ["Northstar Demo Supplies", "Bluebird Sample Consulting", "Alex Rivera", "Demo Payroll Clearing", "Sample Mobile Recipient", "Atlas Demo Services"],
   vendorCurrencies: Object.fromEntries(["Northstar Demo Supplies", "Bluebird Sample Consulting", "Alex Rivera", "Demo Payroll Clearing", "Sample Mobile Recipient", "Atlas Demo Services"].map((payee) => [payee, "BOTH"])),
   natureOfPayments: defaultNatureOfPayments,
@@ -183,7 +185,10 @@ function normalizeMasterData(value: Partial<MasterData>): MasterData {
   })) as Record<string, VendorCurrency>;
   const natureOfPayments = value.natureOfPayments?.length ? value.natureOfPayments : defaultNatureOfPayments;
   const workflows = Object.fromEntries(natureOfPayments.map((nature) => { const saved = savedWorkflows[nature]; const migrateDefault = usesLegacyDefaultRoute(saved?.diagram); return [nature, { ...defaultWorkflow, ...(saved ?? {}), ...(migrateDefault ? { accountingReview: true } : {}), diagram: migrateDefault ? clonePrototypeDiagram() : normalizePrototypeDiagram(saved?.diagram) }]; }));
-  return { projects: value.projects ?? defaultMasterData.projects, accounts: value.accounts ?? defaultMasterData.accounts, payees, vendorCurrencies, natureOfPayments, workflows };
+  const projectCodes = value.projects ?? defaultMasterData.projects;
+  const accountValues = value.accounts ?? defaultMasterData.accounts;
+  const accountProjectCodes = value.accountProjectCodes ?? Object.fromEntries(accountValues.map((account) => [account, [...projectCodes]]));
+  return { projects: projectCodes, accounts: accountValues, accountProjectCodes, payees, vendorCurrencies, natureOfPayments, workflows };
 }
 function isVendorCurrencyAllowed(payee: string, currency: string, vendorCurrencies: MasterData["vendorCurrencies"]) {
   const allowedCurrency = vendorCurrencies[payee] ?? "BOTH";
@@ -701,10 +706,12 @@ export function PrototypeApp() {
             <NewRequest
               projectCodes={masterData.projects}
               accountOptions={masterData.accounts}
+              accountProjectCodes={masterData.accountProjectCodes}
               payeeOptions={masterData.payees}
               vendorCurrencies={masterData.vendorCurrencies}
               natureOptions={masterData.natureOfPayments}
               workflows={masterData.workflows}
+              notify={notify}
               save={(r) => {
                 setRows((a) => [r, ...a]);
                 setSelected(r.id);
@@ -722,6 +729,7 @@ export function PrototypeApp() {
               notify={notify}
               projectCodes={masterData.projects}
               accountOptions={masterData.accounts}
+              accountProjectCodes={masterData.accountProjectCodes}
               payeeOptions={masterData.payees}
               vendorCurrencies={masterData.vendorCurrencies}
               natureOptions={masterData.natureOfPayments}
@@ -1086,6 +1094,8 @@ function NewRequest({
   save,
   projectCodes,
   accountOptions,
+  accountProjectCodes,
+  notify,
   payeeOptions,
   vendorCurrencies,
   natureOptions,
@@ -1094,6 +1104,8 @@ function NewRequest({
   save: (r: Req) => void;
   projectCodes: string[];
   accountOptions: string[];
+  accountProjectCodes: AccountProjectMap;
+  notify: (message: string) => void;
   payeeOptions: string[];
   vendorCurrencies: MasterData["vendorCurrencies"];
   natureOptions: string[];
@@ -1148,8 +1160,12 @@ function NewRequest({
       window.removeEventListener("focus", onFocus);
     };
   }, [company, requestDate]);
-  const change = (i: number, k: keyof Line, v: string) =>
-      setLines((a) => a.map((l, n) => (n === i ? { ...l, [k]: v } : l))),
+  const change = (i: number, k: keyof Line, v: string) => {
+      const selected = lines[i];
+      const shouldClearAccount = k === "project" && Boolean(selected?.account) && !accountIsApplicable(v, selected?.account ?? "", accountProjectCodes);
+      if (shouldClearAccount) notify("Account cleared because it isn't configured for the selected Project Code.");
+      setLines((a) => a.map((l, n) => n === i ? shouldClearAccount ? { ...l, project: v, account: "" } : { ...l, [k]: v } : l));
+    },
     readDocuments = async (files: FileList | null) => {
       const selectedFiles = Array.from(files ?? []);
       if (!selectedFiles.length) return;
@@ -1182,7 +1198,7 @@ function NewRequest({
     },
     done = async (submit: boolean) => {
       const errors = submit
-        ? [...getPrototypeRequestErrors(payee, nature, lines), ...(!isVendorCurrencyAllowed(payee, currency, vendorCurrencies) ? ["Choose a vendor available for the selected currency."] : [])]
+        ? [...getPrototypeRequestErrors(payee, nature, lines), ...lines.flatMap((line) => line.account && !accountIsApplicable(line.project, line.account, accountProjectCodes) ? [`${line.account} is not configured for ${line.project}.`] : []), ...(!isVendorCurrencyAllowed(payee, currency, vendorCurrencies) ? ["Choose a vendor available for the selected currency."] : [])]
         : [];
       setValidationErrors(errors);
       if (errors.length) {
@@ -1316,7 +1332,7 @@ function NewRequest({
                 onChange={(e) => change(i, "account", e.target.value)}
               >
                 <option value="">Accounting to complete</option>
-                {accountOptions.map((x) => (
+                {getApplicableAccounts(l.project, accountOptions, accountProjectCodes).map((x) => (
                   <option key={x}>{x}</option>
                 ))}
               </select>
@@ -1484,6 +1500,7 @@ function Details({
   notify,
   projectCodes,
   accountOptions,
+  accountProjectCodes,
   payeeOptions,
   vendorCurrencies,
   natureOptions,
@@ -1496,6 +1513,7 @@ function Details({
   notify: (x: string) => void;
   projectCodes: string[];
   accountOptions: string[];
+  accountProjectCodes: AccountProjectMap;
   payeeOptions: string[];
   vendorCurrencies: MasterData["vendorCurrencies"];
   natureOptions: string[];
@@ -1515,7 +1533,12 @@ function Details({
     setEditReason("");
     setEditing(true);
   };
-  const changeDraftLine = (index: number, field: keyof Line, value: string) => setDraft((current) => ({ ...current, lines: current.lines.map((line, lineIndex) => lineIndex === index ? { ...line, [field]: value } : line) }));
+  const changeDraftLine = (index: number, field: keyof Line, value: string) => {
+    const selected = draft.lines[index];
+    const shouldClearAccount = field === "project" && Boolean(selected?.account) && !accountIsApplicable(value, selected?.account ?? "", accountProjectCodes);
+    if (shouldClearAccount) notify("Account cleared because it isn't configured for the selected Project Code.");
+    setDraft((current) => ({ ...current, lines: current.lines.map((line, lineIndex) => lineIndex === index ? shouldClearAccount ? { ...line, project: value, account: "" } : { ...line, [field]: value } : line) }));
+  };
   const addRevisionDocuments = async (files: FileList | null) => {
     const additions = await Promise.all(Array.from(files ?? []).map(async (file): Promise<Attachment> => {
       if (!file.type.startsWith("image/") && file.type !== "application/pdf") return { name: file.name, type: file.type };
@@ -1527,6 +1550,8 @@ function Details({
   const saveEdits = (resubmit: boolean) => {
     const validationErrors = getPrototypeRequestErrors(draft.payee, draft.nature, draft.lines);
     if (validationErrors.length) { notify(validationErrors[0]); return; }
+    const invalidChangedLine = draft.lines.find((line) => line.account && !accountIsApplicable(line.project, line.account, accountProjectCodes) && !request.lines.some((original) => original.project === line.project && original.account === line.account));
+    if (invalidChangedLine) { notify(`${invalidChangedLine.account} is not configured for ${invalidChangedLine.project}.`); return; }
     if (!isVendorCurrencyAllowed(draft.payee, draft.currency, vendorCurrencies)) { notify("Choose a vendor available for the selected currency."); return; }
     if (operationalEditor && !editReason.trim()) { notify("Enter an edit reason for the audit timeline"); return; }
     const event = requesterRevision ? (resubmit ? "Requester revised fields and resubmitted" : "Requester saved revised draft") : `${role} edited request data · ${editReason.trim()}`;
@@ -1607,7 +1632,7 @@ function Details({
         <div className="form-head"><div><span className="eyebrow">{requesterRevision ? "Revision workspace" : "Controlled AP edit"}</span><h2>{requesterRevision ? "Revise returned request" : "Edit request data and descriptions"}</h2><p className="muted">Every saved change is recorded in the immutable timeline.</p></div><button className="icon-button" aria-label="Close editor" onClick={() => setEditing(false)}>×</button></div>
         <div className="grid grid-2"><Field label="PAYEE"><select value={draft.payee} onChange={(event) => setDraft((current) => ({ ...current, payee: event.target.value }))}><option value="">Select a payee</option>{applicablePayees.map((option) => <option key={option} value={option}>{option}</option>)}</select></Field><Field label="CURRENCY"><select value={draft.currency} onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value, payee: isVendorCurrencyAllowed(current.payee, event.target.value, vendorCurrencies) ? current.payee : "" }))}><option>PHP</option><option>USD</option></select></Field></div><div className="section"><Field label="NATURE OF PAYMENT"><NaturePicker value={draft.nature} options={natureOptions} onChange={(nature) => setDraft((current) => ({ ...current, nature, other: "" }))}/></Field></div>
         <h2 className="section">Request line items</h2>
-        {draft.lines.map((line, index) => <div className="line-grid" key={index}><Field label="PROJECT CODE"><select value={line.project} onChange={(event) => changeDraftLine(index, "project", event.target.value)}>{projectCodes.map((project) => <option key={project}>{project}</option>)}</select></Field><Field label="ACCOUNT"><select value={line.account} onChange={(event) => changeDraftLine(index, "account", event.target.value)}><option value="">Accounting to complete</option>{accountOptions.map((account) => <option key={account}>{account}</option>)}</select></Field><Field label="PARTICULARS / DESCRIPTION"><textarea value={line.particulars} onChange={(event) => changeDraftLine(index, "particulars", event.target.value)}/></Field><Field label="AMOUNT"><input inputMode="decimal" value={line.amount} onChange={(event) => changeDraftLine(index, "amount", event.target.value)}/></Field><button className="button secondary" disabled={draft.lines.length === 1} onClick={() => setDraft((current) => ({ ...current, lines: current.lines.filter((_, lineIndex) => lineIndex !== index) }))}>×</button></div>)}
+        {draft.lines.map((line, index) => <div className="line-grid" key={index}><Field label="PROJECT CODE"><select value={line.project} onChange={(event) => changeDraftLine(index, "project", event.target.value)}>{projectCodes.map((project) => <option key={project}>{project}</option>)}</select></Field><Field label="ACCOUNT"><select value={line.account} onChange={(event) => changeDraftLine(index, "account", event.target.value)}><option value="">Accounting to complete</option>{!accountIsApplicable(line.project, line.account, accountProjectCodes) && line.account && <option value={line.account}>{line.account} (historical selection)</option>}{getApplicableAccounts(line.project, accountOptions, accountProjectCodes).map((account) => <option key={account}>{account}</option>)}</select></Field><Field label="PARTICULARS / DESCRIPTION"><textarea value={line.particulars} onChange={(event) => changeDraftLine(index, "particulars", event.target.value)}/></Field><Field label="AMOUNT"><input inputMode="decimal" value={line.amount} onChange={(event) => changeDraftLine(index, "amount", event.target.value)}/></Field><button className="button secondary" disabled={draft.lines.length === 1} onClick={() => setDraft((current) => ({ ...current, lines: current.lines.filter((_, lineIndex) => lineIndex !== index) }))}>×</button></div>)}
         <div className="editor-toolbar"><button className="button secondary" onClick={() => setDraft((current) => ({ ...current, lines: [...current.lines, { project: projectCodes[0] ?? "", account: "", particulars: "", amount: "" }] }))}>+ Add line</button><strong>Total: {cash(total(draft.lines), draft.currency)}</strong></div>
         <h2 className="section">Supporting documents</h2><label className="upload">Add revised documents<input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.doc,.docx" onChange={(event) => void addRevisionDocuments(event.target.files)}/></label><div className="actions">{draft.documents.map((document, index) => <span className="badge green" key={`${document.name}-${index}`}>{document.name}<button className="badge-remove" aria-label={`Remove ${document.name}`} onClick={() => setDraft((current) => ({ ...current, documents: current.documents.filter((_, documentIndex) => documentIndex !== index) }))}>×</button></span>)}</div>
         {operationalEditor && <Field label="EDIT REASON (REQUIRED FOR AUDIT)"><textarea value={editReason} onChange={(event) => setEditReason(event.target.value)} placeholder="Explain why AP or the reviewer changed the request"/></Field>}
@@ -1869,7 +1894,19 @@ function Settings({
   }, [masterData.natureOfPayments, workflowNature]);
   const updateList = (key: "projects" | "accounts" | "payees", values: string[]) =>
     onChange((current) => {
-      if (key !== "payees") return { ...current, [key]: values };
+      if (key === "projects") {
+        const removed = current.projects.filter((project) => !values.includes(project));
+        const added = values.filter((project) => !current.projects.includes(project));
+        const renamedFrom = removed.length === 1 && added.length === 1 ? removed[0] : undefined;
+        const renamedTo = renamedFrom ? added[0] : undefined;
+        return { ...current, projects: values, accountProjectCodes: Object.fromEntries(current.accounts.map((account) => [account, (current.accountProjectCodes[account] ?? []).filter((project) => !removed.includes(project)).concat(renamedTo && (current.accountProjectCodes[account] ?? []).includes(renamedFrom!) ? [renamedTo] : [])])) };
+      }
+      if (key === "accounts") {
+        const removed = current.accounts.filter((account) => !values.includes(account));
+        const added = values.filter((account) => !current.accounts.includes(account));
+        const renamedFrom = removed.length === 1 && added.length === 1 ? removed[0] : undefined;
+        return { ...current, accounts: values, accountProjectCodes: Object.fromEntries(values.map((account) => [account, current.accountProjectCodes[account] ?? (account === added[0] && renamedFrom ? current.accountProjectCodes[renamedFrom] ?? [] : [])])) };
+      }
       const removed = current.payees.filter((payee) => !values.includes(payee));
       const added = values.filter((payee) => !current.payees.includes(payee));
       const renamedCurrency = removed.length === 1 && added.length === 1 ? current.vendorCurrencies[removed[0]] : undefined;
@@ -1964,6 +2001,9 @@ function Settings({
           description="Controls the accounting categories available on line items."
           values={masterData.accounts}
           onChange={(values) => updateList("accounts", values)}
+          projectCodes={masterData.projects}
+          accountProjectCodes={masterData.accountProjectCodes}
+          onAccountProjectCodesChange={(account, projectCodes) => onChange((current) => ({ ...current, accountProjectCodes: { ...current.accountProjectCodes, [account]: projectCodes } }))}
           notify={notify}
           configType="accounts"
           profileId={profileId}
@@ -2119,6 +2159,9 @@ function MasterDataEditor({
   configType,
   profileId,
   onImported,
+  projectCodes,
+  accountProjectCodes,
+  onAccountProjectCodesChange,
 }: {
   icon: string;
   title: string;
@@ -2133,6 +2176,9 @@ function MasterDataEditor({
   configType: PrototypeConfigType;
   profileId: string;
   onImported: (masterData: Partial<MasterData>) => void;
+  projectCodes?: string[];
+  accountProjectCodes?: AccountProjectMap;
+  onAccountProjectCodesChange?: (account: string, projectCodes: string[]) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<number | null>(null);
@@ -2142,6 +2188,8 @@ function MasterDataEditor({
   const [importPreview, setImportPreview] = useState<PrototypeConfigImportPreview | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [showImportDetails, setShowImportDetails] = useState(false);
+  const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
+  const [projectCodeDraft, setProjectCodeDraft] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const duplicate = (value: string, ignoredIndex = -1) =>
     values.some(
@@ -2262,7 +2310,7 @@ function MasterDataEditor({
       {importOpen && <section className="master-import-panel" aria-label={`${prototypeConfigDefinitions[configType].title} bulk import`}>
         <div className="master-import-heading"><strong>Import {prototypeConfigDefinitions[configType].title}</strong><button className="text-button" type="button" onClick={() => { setImportOpen(false); setImportPreview(null); }}>Close</button></div>
         <p>Upload a CSV using these columns: <span>{prototypeConfigDefinitions[configType].headers.join(", ")}</span>. Import only adds new records; existing items are never overwritten. Empty rows are skipped.</p>
-        <small className="master-import-note">All listed columns are required. The current Settings model has no separate status, vendor-code, or account-type fields, so extra columns are rejected.</small>
+        <small className="master-import-note">{configType === "accounts" ? "Account is required; Applicable Project Codes is optional and accepts comma-separated existing Project Codes. Existing Account-only CSVs are supported." : "All listed columns are required. The current Settings model has no separate status, vendor-code, or account-type fields, so extra columns are rejected."}</small>
         {configType === "payees" && <small className="master-import-note">Currency accepts PHP, USD, BOTH, or PHP &amp; USD. Currency is part of each Payee/Vendor record.</small>}
         <div className="master-import-actions"><button className="button secondary" type="button" onClick={downloadTemplate}>Download Template</button><input ref={fileInputRef} className="sr-only" type="file" accept=".csv,text/csv" aria-label={`Upload ${prototypeConfigDefinitions[configType].title} CSV`} onChange={(event) => void inspectUpload(event.target.files?.[0])}/><button className="button" type="button" disabled={importBusy} onClick={() => fileInputRef.current?.click()}>{importBusy ? "Validating…" : importPreview ? "Choose another CSV" : "Choose CSV"}</button></div>
         {importPreview && <div className="master-import-preview">
@@ -2308,9 +2356,11 @@ function MasterDataEditor({
                 <button type="button" onClick={() => setEditing(null)}>Cancel</button>
               </> : <>
                 {allowEdit && <button type="button" onClick={() => { setEditing(index); setEditValue(value); }}>Edit</button>}
+                {configType === "accounts" && projectCodes && accountProjectCodes && onAccountProjectCodesChange && <button type="button" onClick={() => { const expanded = expandedAccount === value; setExpandedAccount(expanded ? null : value); setProjectCodeDraft([...(accountProjectCodes[value] ?? [])]); }}>{expandedAccount === value ? "Hide Project Codes" : "Project Codes"}</button>}
                 <button className="danger-link" type="button" onClick={() => remove(index)}>Remove</button>
               </>}
             </div>
+            {configType === "accounts" && expandedAccount === value && projectCodes && accountProjectCodes && onAccountProjectCodesChange && <div className="account-project-editor"><div className="account-project-heading"><strong>Applicable Project Codes</strong><span>{projectCodeDraft.length} selected</span></div><div className="account-project-actions"><button type="button" onClick={() => setProjectCodeDraft([...projectCodes])}>Select All</button><button type="button" onClick={() => setProjectCodeDraft([])}>Clear All</button></div><div className="account-project-options">{projectCodes.map((project) => <label key={project}><input type="checkbox" checked={projectCodeDraft.includes(project)} onChange={(event) => setProjectCodeDraft((current) => event.target.checked ? [...current, project] : current.filter((item) => item !== project))}/>{project}</label>)}</div><button type="button" className="button" onClick={() => { onAccountProjectCodesChange(value, projectCodeDraft); notify(`Applicable Project Codes saved for ${value}`); }}>Save</button></div>}
           </div>
         ))}
       </div>

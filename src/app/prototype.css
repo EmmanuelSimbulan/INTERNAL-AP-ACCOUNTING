@@ -2536,6 +2536,16 @@
 }
 .master-row-actions button:hover { color: #0066cc; background: #eaf3ff; }
 .master-row-actions .danger-link:hover { color: #c93434; background: #fff0f0; }
+.account-project-editor { grid-column: 1 / -1; padding: 14px; border: 1px solid #e4e9f0; border-radius: 12px; background: #fff; }
+.account-project-heading, .account-project-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.account-project-heading { color: var(--ink); font-size: .82rem; }
+.account-project-heading span { color: var(--muted); font-size: .72rem; }
+.account-project-actions { justify-content: flex-start; margin: 10px 0; }
+.account-project-actions button { border: 0; background: transparent; color: #0066cc; font: inherit; font-size: .75rem; cursor: pointer; }
+.account-project-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 10px 0 14px; }
+.account-project-options label { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid #e6e9ee; border-radius: 9px; color: var(--ink); font-size: .78rem; cursor: pointer; }
+.account-project-options label:has(input:checked) { border-color: #9fc9f3; background: #f2f8ff; }
+.account-project-options input { accent-color: #0878d1; }
 .settings-footnote {
   margin: 18px 0 0;
   color: var(--muted);

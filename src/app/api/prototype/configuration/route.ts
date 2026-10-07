@@ -19,6 +19,7 @@ const currencySchema = z.enum(["PHP", "USD", "BOTH"]);
 const masterDataSchema = z.object({
   projects: z.array(z.string()).default([]),
   accounts: z.array(z.string()).default([]),
+  accountProjectCodes: z.record(z.string(), z.array(z.string())).optional(),
   payees: z.array(z.string()).default([]),
   vendorCurrencies: z.record(z.string(), currencySchema).optional().default({}),
   natureOfPayments: z.array(z.string()).default([]),
@@ -49,6 +50,7 @@ function csvResponse(type: PrototypeConfigType, masterData: z.infer<typeof maste
   const headers = prototypeConfigDefinitions[type].headers;
   const rows = valuesFor(masterData, type).map((value) => {
     if (type === "payees") return [value, masterData.vendorCurrencies[value] ?? "BOTH"];
+    if (type === "accounts") return [value, (masterData.accountProjectCodes?.[value] ?? (masterData.accountProjectCodes ? [] : masterData.projects)).join(", ")];
     return [value];
   });
   const csv = [headers, ...rows].map((row) => row.map(escapePrototypeCsvCell).join(",")).join("\r\n") + "\r\n";
@@ -83,7 +85,7 @@ export async function POST(request: Request) {
     const workspace = await db.prototypeWorkspace.findUnique({ where: { id: "default" }, select: { masterData: true } });
     const masterData = readMasterData(workspace?.masterData);
     if (!masterData) return NextResponse.json({ error: "Saved configuration data is not available. Reload Settings after the workspace has synced." }, { status: 409 });
-    return NextResponse.json(previewPrototypeConfigImport(type, csv, valuesFor(masterData, type)), { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(previewPrototypeConfigImport(type, csv, valuesFor(masterData, type), masterData.projects), { headers: { "Cache-Control": "no-store" } });
   }
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -92,7 +94,7 @@ export async function POST(request: Request) {
         const workspace = await tx.prototypeWorkspace.findUnique({ where: { id: "default" } });
         const masterData = readMasterData(workspace?.masterData);
         if (!workspace || !masterData) throw new Error("CONFIGURATION_NOT_SYNCED");
-        const { preview, values } = prototypeConfigImportValues(type, csv, valuesFor(masterData, type));
+        const { preview, values, projectCodesByValue } = prototypeConfigImportValues(type, csv, valuesFor(masterData, type), masterData.projects);
         const additions = [...values.entries()];
         if (!additions.length) return { preview, importedRecords: 0, masterData };
 
@@ -101,7 +103,11 @@ export async function POST(request: Request) {
           updated.payees = [...masterData.payees, ...additions.map(([name]) => name)];
           updated.vendorCurrencies = { ...masterData.vendorCurrencies, ...Object.fromEntries(additions) };
         } else if (type === "projects") updated.projects = [...masterData.projects, ...additions.map(([name]) => name)];
-        else if (type === "accounts") updated.accounts = [...masterData.accounts, ...additions.map(([name]) => name)];
+        else if (type === "accounts") {
+          updated.accounts = [...masterData.accounts, ...additions.map(([name]) => name)];
+          const existingMappings = masterData.accountProjectCodes ?? Object.fromEntries(masterData.accounts.map((account) => [account, [...masterData.projects]]));
+          updated.accountProjectCodes = { ...existingMappings, ...Object.fromEntries(additions.map(([name]) => [name, projectCodesByValue.get(name) ?? []])) };
+        }
         else {
           updated.natureOfPayments = [...masterData.natureOfPayments, ...additions.map(([name]) => name)];
           updated.workflows = { ...masterData.workflows, ...Object.fromEntries(additions.map(([name]) => [name, createDefaultPrototypeWorkflowControl()])) };

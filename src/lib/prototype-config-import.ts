@@ -33,10 +33,10 @@ export const prototypeConfigDefinitions: Record<PrototypeConfigType, {
   },
   accounts: {
     title: "Accounts",
-    headers: ["Account"],
+    headers: ["Account", "Applicable Project Codes"],
     maxLength: 200,
     maxRecords: 500,
-    sampleRows: [["Office Supplies"]],
+    sampleRows: [["Transportation", "Dealership, IT"]],
   },
   payees: {
     title: "Payees / Vendors",
@@ -115,7 +115,7 @@ function normalizeCurrency(value: string): "PHP" | "USD" | "BOTH" | null {
   return null;
 }
 
-export function previewPrototypeConfigImport(type: PrototypeConfigType, csv: string, currentValues: string[]) {
+export function previewPrototypeConfigImport(type: PrototypeConfigType, csv: string, currentValues: string[], currentProjects: string[] = []) {
   const definition = prototypeConfigDefinitions[type];
   const parsed = parseCsv(csv);
   const allRows = parsed.rows;
@@ -124,7 +124,9 @@ export function previewPrototypeConfigImport(type: PrototypeConfigType, csv: str
   const expected = definition.headers.map((header) => header.trim().toLowerCase());
   const normalizedHeaders = headers.map((header) => header.trim().toLowerCase());
   const duplicateHeader = new Set(normalizedHeaders).size !== normalizedHeaders.length;
-  const headerValid = parsed.errors.length === 0 && !duplicateHeader && normalizedHeaders.length === expected.length && expected.every((header) => normalizedHeaders.includes(header));
+  const requiredHeaders = type === "accounts" ? ["account"] : expected;
+  const allowedHeaders = type === "accounts" ? expected : expected;
+  const headerValid = parsed.errors.length === 0 && !duplicateHeader && requiredHeaders.every((header) => normalizedHeaders.includes(header)) && normalizedHeaders.every((header) => allowedHeaders.includes(header));
   const columnIndexes = Object.fromEntries(expected.map((header) => [header, normalizedHeaders.indexOf(header)]));
   const errors = [...parsed.errors];
   if (!headerValid) errors.push(`Invalid column headers. Expected: ${definition.headers.join(", ")}.`);
@@ -155,6 +157,14 @@ export function previewPrototypeConfigImport(type: PrototypeConfigType, csv: str
     const currency = type === "payees" && headerValid && cells.length === headers.length
       ? normalizeCurrency(cells[columnIndexes.currency] ?? "")
       : null;
+    if (!problem && type === "accounts" && columnIndexes["applicable project codes"] >= 0) {
+      const codeCell = cells[columnIndexes["applicable project codes"]] ?? "";
+      const codes = codeCell.split(",").map((code) => code.trim()).filter(Boolean);
+      const knownCodes = new Set(currentProjects.map((code) => code.toLocaleLowerCase()));
+      const seenCodes = new Set<string>();
+      if (codes.some((code) => !knownCodes.has(code.toLocaleLowerCase()))) problem = `Applicable Project Codes must reference existing Project Codes: ${codes.filter((code) => !knownCodes.has(code.toLocaleLowerCase())).join(", ")}.`;
+      else if (codes.some((code) => seenCodes.has(code.toLocaleLowerCase()) || !seenCodes.add(code.toLocaleLowerCase()))) problem = "Applicable Project Codes contains a duplicate value.";
+    }
     if (!problem && type === "payees" && !currency) problem = "Currency must be PHP, USD, or BOTH (PHP & USD).";
     if (problem) {
       invalidRecords += 1;
@@ -204,18 +214,22 @@ export function previewPrototypeConfigImport(type: PrototypeConfigType, csv: str
   } satisfies PrototypeConfigImportPreview;
 }
 
-export function prototypeConfigImportValues(type: PrototypeConfigType, csv: string, currentValues: string[]) {
-  const preview = previewPrototypeConfigImport(type, csv, currentValues);
+export function prototypeConfigImportValues(type: PrototypeConfigType, csv: string, currentValues: string[], currentProjects: string[] = []) {
+  const preview = previewPrototypeConfigImport(type, csv, currentValues, currentProjects);
   const { rows: parsedRows } = parseCsv(csv);
   const headers = parsedRows.shift() ?? [];
   const expected = prototypeConfigDefinitions[type].headers.map((header) => header.trim().toLowerCase());
   const indexes = Object.fromEntries(expected.map((header) => [header, headers.findIndex((item) => item.trim().toLowerCase() === header)]));
   const values = new Map<string, "PHP" | "USD" | "BOTH">();
+  const projectCodesByValue = new Map<string, string[]>();
   for (const result of preview.rows) {
     if (result.status !== "new") continue;
     const cells = parsedRows[result.rowNumber - 2] ?? [];
     const value = cells[indexes[expected[0]]]?.trim();
-    if (value) values.set(value, type === "payees" ? normalizeCurrency(cells[indexes.currency] ?? "") ?? "BOTH" : "BOTH");
+    if (value) {
+      values.set(value, type === "payees" ? normalizeCurrency(cells[indexes.currency] ?? "") ?? "BOTH" : "BOTH");
+      if (type === "accounts") projectCodesByValue.set(value, (cells[indexes["applicable project codes"]] ?? "").split(",").map((code) => code.trim()).filter(Boolean).map((code) => currentProjects.find((project) => project.toLocaleLowerCase() === code.toLocaleLowerCase()) ?? code));
+    }
   }
-  return { preview, values };
+  return { preview, values, projectCodesByValue };
 }

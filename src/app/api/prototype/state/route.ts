@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { demoProfiles } from "@/lib/demo-profiles";
+import { accountIsApplicable } from "@/lib/prototype-project-account";
 
 export const dynamic = "force-dynamic";
 
@@ -62,10 +63,16 @@ const workflowControlSchema = z.object({
 const masterDataSchema = z.object({
   projects: z.array(z.string().trim().min(1).max(200)).min(1).max(500),
   accounts: z.array(z.string().trim().min(1).max(200)).min(1).max(500),
+  accountProjectCodes: z.record(z.string().max(200), z.array(z.string().trim().min(1).max(200)).max(500)).optional(),
   payees: z.array(z.string().trim().min(1).max(300)).min(1).max(1_000),
   vendorCurrencies: z.record(z.string().max(300), z.enum(["PHP", "USD", "BOTH"])).optional().default({}),
   natureOfPayments: z.array(z.string().trim().min(1).max(500)).min(1).max(200).optional(),
   workflows: z.record(z.string(), workflowControlSchema).optional().default({}),
+}).superRefine((data, context) => {
+  for (const [account, codes] of Object.entries(data.accountProjectCodes ?? {})) {
+    if (!data.accounts.includes(account)) context.addIssue({ code: "custom", message: `Project mapping references unknown account: ${account}` });
+    for (const code of codes) if (!data.projects.includes(code)) context.addIssue({ code: "custom", message: `Project mapping references unknown Project Code: ${code}` });
+  }
 });
 const stateSchema = z.object({
   profileId: z.string(),
@@ -98,21 +105,40 @@ export async function PUT(request: Request) {
   if (profile.role === "Auditor" && existing) {
     return NextResponse.json({ error: "Auditor access is read-only" }, { status: 403 });
   }
-  const existingMasterData = masterDataSchema.safeParse(existing?.masterData);
-  const masterData =
-    profile.role === "Administrator" || !existingMasterData.success
-      ? parsed.data.masterData
-      : existingMasterData.data;
   let saved;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       saved = await db.$transaction(async (tx) => {
         const current = await tx.prototypeWorkspace.findUnique({ where: { id: "default" } });
+        const existingMasterData = masterDataSchema.safeParse(current?.masterData);
+        const masterData = profile.role === "Administrator" || !existingMasterData.success
+          ? parsed.data.masterData
+          : existingMasterData.data;
         const currentRows = Array.isArray(current?.requests) ? current.requests : [];
         const rowsById = new Map<string, (typeof parsed.data.rows)[number]>();
         for (const row of currentRows) {
           if (row && typeof row === "object" && "id" in row && typeof row.id === "string") {
             rowsById.set(row.id, row as (typeof parsed.data.rows)[number]);
+          }
+        }
+        const baselineRows = new Map(rowsById);
+        for (const row of parsed.data.rows) {
+          const previous = baselineRows.get(row.id);
+          const priorPairCounts = new Map<string, number>();
+          for (const line of previous?.lines ?? []) {
+            const key = JSON.stringify([line.project, line.account]);
+            priorPairCounts.set(key, (priorPairCounts.get(key) ?? 0) + 1);
+          }
+          for (const [index, line] of row.lines.entries()) {
+            if (!line.account) continue;
+            const pairKey = JSON.stringify([line.project, line.account]);
+            const priorCount = priorPairCounts.get(pairKey) ?? 0;
+            const pairAlreadyPresent = priorCount > 0;
+            if (pairAlreadyPresent) priorPairCounts.set(pairKey, priorCount - 1);
+            const changedPair = !pairAlreadyPresent;
+            if (changedPair && !accountIsApplicable(line.project, line.account, masterData.accountProjectCodes, !masterData.accountProjectCodes)) {
+              throw new Error(`INVALID_ACCOUNT_PROJECT:${JSON.stringify({ lineNumber: index + 1, account: line.account, project: line.project })}`);
+            }
           }
         }
         for (const row of parsed.data.rows) rowsById.set(row.id, row);
@@ -125,6 +151,10 @@ export async function PUT(request: Request) {
       }, { isolationLevel: "Serializable" });
       break;
     } catch (error) {
+      if (error instanceof Error && error.message.startsWith("INVALID_ACCOUNT_PROJECT:")) {
+        const details = JSON.parse(error.message.slice("INVALID_ACCOUNT_PROJECT:".length)) as { lineNumber: number; account: string; project: string };
+        return NextResponse.json({ error: `${details.account} is not configured for Project Code ${details.project} (line ${details.lineNumber}).` }, { status: 400 });
+      }
       const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
       if (code !== "P2034" || attempt === 2) throw error;
     }
