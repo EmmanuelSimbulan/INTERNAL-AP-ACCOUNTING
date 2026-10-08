@@ -11,7 +11,7 @@ import {
   generateInvoiceNumber,
   getCompanyNumberingRule,
 } from "@/lib/company-numbering";
-import { demoProfiles, type DemoRole as Role } from "@/lib/demo-profiles";
+import { demoProfiles, type DemoProfile, type DemoRole as Role } from "@/lib/demo-profiles";
 import { createPrototypeConfigTemplate, prototypeConfigDefinitions, type PrototypeConfigImportPreview, type PrototypeConfigType } from "@/lib/prototype-config-import";
 import {
   getPrototypeRequestErrors,
@@ -119,6 +119,54 @@ function normalizeRequestWorkflow(request: Req): Req {
     approvalStep: needsApCatchup ? plan.indexOf("AP Validation") : requestApprovalStepIndex(request, plan),
     ...(needsApCatchup ? { status: "Pending AP Validation" as const, timeline: [...request.timeline, "Workflow updated: sent to AP Processor for validation before Accounting review"] } : {}),
   };
+}
+type WorkflowInboxAction = "approve" | "return" | "reject" | "validate" | "post" | "recordPayment" | "reconcile" | "close" | "open";
+type WorkflowInboxItem = {
+  id: string;
+  request: Req;
+  title: string;
+  detail: string;
+  actions: Array<{ label: string; action: WorkflowInboxAction; secondary?: boolean; danger?: boolean }>;
+};
+function getWorkflowInbox(rows: Req[], profile: DemoProfile): WorkflowInboxItem[] {
+  const items: WorkflowInboxItem[] = [];
+  const add = (request: Req, title: string, detail: string, actions: WorkflowInboxItem["actions"]) => {
+    items.push({ id: `${request.id}-${title}`, request, title, detail, actions });
+  };
+  for (const request of rows) {
+    if (profile.role === "Approver" && request.status === "Pending Manager Approval") {
+      add(request, "Manager approval needed", `${request.number} · ${request.payee} · ${cash(total(request.lines), request.currency)}`, [
+        { label: "Approve", action: "approve" },
+        { label: "Return", action: "return", secondary: true },
+        { label: "Reject", action: "reject", secondary: true, danger: true },
+      ]);
+    } else if (profile.role === "AP Reviewer" && request.status === "Pending Accounting Review") {
+      add(request, "Accounting review needed", `${request.number} · ${request.payee} · ${cash(total(request.lines), request.currency)}`, [
+        { label: "Approve review", action: "approve" },
+        { label: "Return", action: "return", secondary: true },
+        { label: "Reject", action: "reject", secondary: true, danger: true },
+      ]);
+    } else if (profile.role === "AP Processor" && ["Manager Approved", "Pending AP Validation"].includes(request.status)) {
+      const nextStage = requestApprovalPlan(request)[requestApprovalStepIndex(request, requestApprovalPlan(request)) + 1];
+      add(request, "AP validation needed", `${request.number} · ${request.payee} · ${cash(total(request.lines), request.currency)}`, [
+        { label: nextStage === "Accounting Review" ? "Validate & send to AP Reviewer" : "Complete AP validation", action: "validate" },
+        { label: "Return to Requestor", action: "return", secondary: true },
+      ]);
+    } else if (profile.role === "AP Processor" && request.status === "Ready for QuickBooks") {
+      add(request, "Ready to post", `${request.number} · ${request.payee} · ${cash(total(request.lines), request.currency)}`, [{ label: "Generate QB CSV & Post", action: "post" }]);
+    } else if (profile.role === "AP Processor" && request.status === "Posted to QuickBooks") {
+      add(request, "Payment action needed", `${request.number} · ${request.payee} · ${request.qbId ?? "Posted to QuickBooks"}`, [{ label: "Record payment", action: "recordPayment" }]);
+    } else if (["AP Processor", "AP Reviewer"].includes(profile.role) && request.status === "Paid") {
+      add(request, "Reconciliation needed", `${request.number} · ${request.payee} · ${cash(total(request.lines), request.currency)}`, [{ label: "Reconcile", action: "reconcile" }]);
+    } else if (profile.role === "AP Reviewer" && request.status === "Reconciled") {
+      add(request, "Ready to close", `${request.number} · ${request.payee}`, [{ label: "Close request", action: "close" }]);
+    } else if (profile.role === "Requester" && request.requester === profile.name && ["Returned for Revision", "Rejected"].includes(request.status)) {
+      add(request, request.status === "Returned for Revision" ? "Revision requested" : "Request rejected", `${request.number} · ${request.timeline.at(-1) ?? request.status}`, [{ label: request.status === "Returned for Revision" ? "Revise request" : "View request", action: "open" }]);
+    } else if (["Administrator", "Auditor"].includes(profile.role) && ["Pending Manager Approval", "Manager Approved", "Pending AP Validation", "Pending Accounting Review", "Ready for QuickBooks", "Posted to QuickBooks", "Paid", "Reconciled"].includes(request.status)) {
+      add(request, `Workflow: ${request.status}`, `${request.number} · ${request.payee} · ${request.company}`, [{ label: "View request", action: "open" }]);
+    }
+  }
+  return items.sort((a, b) => b.request.date.localeCompare(a.request.date));
 }
 const defaultNatureOfPayments = [
   "Cash Advance",
@@ -447,6 +495,7 @@ const total = (l: Line[]) =>
 export function PrototypeApp() {
   const [activeProfileId, setActiveProfileId] = useState(demoProfiles[0].id),
     [profileMenuOpen, setProfileMenuOpen] = useState(false),
+    [notificationsOpen, setNotificationsOpen] = useState(false),
     [masterData, setMasterData] = useState<MasterData>(defaultMasterData),
     [rows, setRows] = useState<Req[]>([]),
     [selected, setSelected] = useState(""),
@@ -626,6 +675,57 @@ export function PrototypeApp() {
     const checkpoint = r.statusHistory[r.statusHistory.length - 1];
     return { ...r, status: checkpoint.status, approvalPlan: checkpoint.approvalPlan, approvalStep: checkpoint.approvalStep, requireApValidation: checkpoint.requireApValidation, qbId: checkpoint.qbId, paymentRef: checkpoint.paymentRef, reconciliationRef: checkpoint.reconciliationRef, statusHistory: r.statusHistory.slice(0, -1), timeline: [...r.timeline, `Undid status action: ${checkpoint.event}; restored ${checkpoint.status}`] };
   }));
+  const workflowInbox = getWorkflowInbox(rows, activeProfile);
+  const actOnWorkflowInbox = (itemId: string, action: WorkflowInboxAction) => {
+    const item = getWorkflowInbox(rows, activeProfile).find((entry) => entry.id === itemId);
+    if (!item) {
+      notify("This workflow step has already changed. The inbox has been refreshed.");
+      setNotificationsOpen(false);
+      return;
+    }
+    const request = rows.find((row) => row.id === item.request.id);
+    if (!request) return;
+    if (action === "open") {
+      open(request.id);
+      setNotificationsOpen(false);
+      return;
+    }
+    if (action === "approve" || action === "validate") {
+      const stage: ApprovalPlanStep = action === "validate" ? "AP Validation" : role === "Approver" ? "Manager Approval" : "Accounting Review";
+      const plan = requestApprovalPlan(request);
+      const nextStep = requestApprovalStepIndex(request, plan) + 1;
+      const nextStage = plan[nextStep];
+      const status: Status = nextStage === "Manager Approval" ? "Pending Manager Approval" : nextStage === "Accounting Review" ? "Pending Accounting Review" : nextStage === "AP Validation" ? "Pending AP Validation" : "Ready for QuickBooks";
+      update(request.id, { status, approvalPlan: plan, approvalStep: nextStep }, `${stage} approved by ${activeProfile.name}`);
+      notify(`${stage === "AP Validation" ? "AP validation completed" : `${stage} approved`} · ${request.number}`);
+    } else if (action === "return") {
+      const event = role === "AP Processor" ? "AP Processor found an issue and returned the request to the Requestor" : role === "AP Reviewer" ? "Accounting review returned for revision" : "Returned: clarify particulars";
+      update(request.id, { status: "Returned for Revision" }, event);
+      notify(`Request returned to the Requestor · ${request.number}`);
+    } else if (action === "reject") {
+      const event = role === "AP Reviewer" ? "Rejected during accounting review" : "Rejected";
+      update(request.id, { status: "Rejected" }, event);
+      notify(`Request rejected · ${request.number}`);
+    } else if (action === "post" && role === "AP Processor" && request.status === "Ready for QuickBooks") {
+      downloadSaasantBillCsv(request);
+      update(request.id, { status: "Posted to QuickBooks", qbId: `QB-DEMO-${request.id.slice(-4)}` }, "SaaSAnt-compatible bill CSV generated and posting confirmed");
+      notify(`QB CSV generated and request posted · ${request.number}`);
+    } else if (action === "recordPayment" && role === "AP Processor" && request.status === "Posted to QuickBooks") {
+      update(request.id, { status: "Paid", paymentRef: "PAY-DEMO" }, "Payment recorded: PAY-DEMO");
+      notify(`Payment recorded · ${request.number}`);
+    } else if (action === "reconcile" && ["AP Processor", "AP Reviewer"].includes(role) && request.status === "Paid") {
+      update(request.id, { status: "Reconciled" }, "Bank payment reconciled");
+      notify(`Payment reconciled · ${request.number}`);
+    } else if (action === "close" && role === "AP Reviewer" && request.status === "Reconciled") {
+      update(request.id, { status: "Closed" }, "Reviewed and closed");
+      notify(`Request closed · ${request.number}`);
+    } else {
+      notify("This action is no longer available for the current request status.");
+      setNotificationsOpen(false);
+      return;
+    }
+    setNotificationsOpen(false);
+  };
   return (
     <div className="prototype">
       <header className="proto-top">
@@ -689,8 +789,25 @@ export function PrototypeApp() {
             <span className={`sync-indicator ${syncStatus}`} title="Production database status">
               <i />{syncStatus === "loading" ? "Connecting" : syncStatus === "saving" ? "Saving" : syncStatus === "synced" ? "Database saved" : "Database unavailable"}
             </span>
+            <div className="notification-center">
+              <button className="notification-trigger" type="button" aria-label={workflowInbox.length ? `Notifications, ${workflowInbox.length} pending actions` : "Notifications"} aria-expanded={notificationsOpen} aria-haspopup="dialog" onClick={() => { setNotificationsOpen((open) => !open); setProfileMenuOpen(false); }}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></svg>
+                {workflowInbox.length > 0 && <span className="notification-count">{workflowInbox.length > 99 ? "99+" : workflowInbox.length}</span>}
+              </button>
+              {notificationsOpen && <>
+                <button className="notification-backdrop" type="button" aria-label="Close notifications" onClick={() => setNotificationsOpen(false)} />
+                <section className="notification-menu" role="dialog" aria-label="AP workflow notifications">
+                  <header className="notification-menu-head"><div><span className="eyebrow">{activeProfile.role} inbox</span><strong>Notifications</strong></div><span className="badge">{workflowInbox.length} pending</span></header>
+                  {workflowInbox.length ? <div className="notification-list">{workflowInbox.map((item) => <article className="notification-item" key={item.id}>
+                    <span className="notification-item-mark" aria-hidden="true">{item.title.includes("rejected") ? "!" : "↗"}</span>
+                    <div className="notification-item-content"><strong>{item.title}</strong><p>{item.detail}</p><div className="notification-item-actions">{item.actions.map((action) => <button key={action.action} type="button" className={`button ${action.secondary ? "secondary" : ""} ${action.danger ? "danger" : ""}`} onClick={() => actOnWorkflowInbox(item.id, action.action)}>{action.label}</button>)}</div></div>
+                  </article>)}</div> : <div className="notification-empty"><strong>You’re all caught up</strong><span>New workflow actions will appear here when a request reaches your role.</span></div>}
+                  <footer className="notification-menu-foot">Workflow actions update the shared request and move it to the next responsible role.</footer>
+                </section>
+              </>}
+            </div>
             <div className="profile-switcher">
-              <button className="profile-trigger" type="button" aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen((open) => !open)}>
+                <button className="profile-trigger" type="button" aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { setProfileMenuOpen((open) => !open); setNotificationsOpen(false); }}>
                 <span className="profile-avatar" style={{ background: activeProfile.accent }}>{activeProfile.initials}</span>
                 <span className="profile-trigger-copy"><strong>{activeProfile.name}</strong><small>{activeProfile.role}</small></span>
                 <span className="profile-chevron">⌄</span>
