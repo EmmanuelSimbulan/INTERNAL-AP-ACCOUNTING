@@ -454,10 +454,12 @@ export function PrototypeApp() {
       "dashboard" | "new" | "detail" | "queue" | "reports" | "settings" | "audit"
     >("dashboard"),
     [toast, setToast] = useState(""),
+    [saveConfirmationId, setSaveConfirmationId] = useState(0),
     [databaseHydrated, setDatabaseHydrated] = useState(false),
     [syncStatus, setSyncStatus] = useState<"loading" | "saving" | "synced" | "offline">("loading"),
     [syncError, setSyncError] = useState("");
   const serverUpdatedAtRef = useRef<string | null>(null);
+  const pendingSaveNoticeRef = useRef<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const applyingRemoteStateRef = useRef(false);
   const syncStatusRef = useRef(syncStatus);
@@ -524,11 +526,16 @@ export function PrototypeApp() {
         serverUpdatedAtRef.current = saved.updatedAt;
         setSyncError("");
         setSyncStatus("synced");
-        if (saved.changed) notify("All changes saved");
+        if (saved.changed || pendingSaveNoticeRef.current) {
+          notify(pendingSaveNoticeRef.current ?? "All changes saved");
+          pendingSaveNoticeRef.current = null;
+          setSaveConfirmationId((current) => current + 1);
+        }
       } catch (error) {
         console.error("Prototype database save failed", error);
         setSyncError("The latest changes were not saved. Reconnect to load the last saved data.");
         setSyncStatus("offline");
+        pendingSaveNoticeRef.current = null;
       }
     }, 650);
     return () => window.clearTimeout(timeout);
@@ -753,6 +760,9 @@ export function PrototypeApp() {
             <Settings
               masterData={masterData}
               onChange={setMasterData}
+              onSave={(next) => { pendingSaveNoticeRef.current = "Settings saved"; setMasterData(next); }}
+              saveStatus={syncStatus}
+              saveConfirmationId={saveConfirmationId}
               notify={notify}
               profileId={activeProfileId}
             />
@@ -1888,16 +1898,43 @@ function PdfPreview({ document }: { document: Attachment }) {
   return <iframe src={source} title={document.name}/>;
 }
 function Settings({
-  masterData,
+  masterData: savedMasterData,
   onChange,
+  onSave,
+  saveStatus,
+  saveConfirmationId,
   notify,
   profileId,
 }: {
   masterData: MasterData;
   onChange: React.Dispatch<React.SetStateAction<MasterData>>;
+  onSave: (masterData: MasterData) => void;
+  saveStatus: "loading" | "saving" | "synced" | "offline";
+  saveConfirmationId: number;
   notify: (message: string) => void;
   profileId: string;
 }) {
+  const [masterData, setMasterData] = useState(savedMasterData);
+  const [saveRequested, setSaveRequested] = useState(false);
+  const [draftRevision, setDraftRevision] = useState(0);
+  const lastSaveConfirmationRef = useRef(saveConfirmationId);
+  useEffect(() => {
+    if (lastSaveConfirmationRef.current !== saveConfirmationId) {
+      lastSaveConfirmationRef.current = saveConfirmationId;
+      setSaveRequested(false);
+      setDraftRevision((revision) => revision + 1);
+    }
+  }, [saveConfirmationId]);
+  useEffect(() => {
+    if (saveRequested && saveStatus === "offline") {
+      setSaveRequested(false);
+      notify("Settings were not saved. Check the database connection, then try again.");
+    }
+  }, [saveRequested, saveStatus, notify]);
+  const hasUnsavedChanges = JSON.stringify(masterData) !== JSON.stringify(savedMasterData);
+  useEffect(() => {
+    if (!hasUnsavedChanges) setMasterData(savedMasterData);
+  }, [savedMasterData, hasUnsavedChanges]);
   const [workflowNature, setWorkflowNature] = useState(masterData.natureOfPayments[0] ?? "");
   useEffect(() => {
     if (!masterData.natureOfPayments.includes(workflowNature)) {
@@ -1905,7 +1942,7 @@ function Settings({
     }
   }, [masterData.natureOfPayments, workflowNature]);
   const updateList = (key: "projects" | "accounts" | "payees", values: string[]) =>
-    onChange((current) => {
+    setMasterData((current) => {
       if (key === "projects") {
         const removed = current.projects.filter((project) => !values.includes(project));
         const added = values.filter((project) => !current.projects.includes(project));
@@ -1929,10 +1966,10 @@ function Settings({
       };
     });
   const updateVendorCurrency = (payee: string, currency: VendorCurrency) => {
-    onChange((current) => ({ ...current, vendorCurrencies: { ...current.vendorCurrencies, [payee]: currency } }));
-    notify(`${payee} currency availability updated`);
+    setMasterData((current) => ({ ...current, vendorCurrencies: { ...current.vendorCurrencies, [payee]: currency } }));
+    notify("Unsaved settings changes");
   };
-  const updateNatureOptions = (values: string[]) => onChange((current) => {
+  const updateNatureOptions = (values: string[]) => setMasterData((current) => {
     const removed = current.natureOfPayments.filter((nature) => !values.includes(nature));
     const added = values.filter((nature) => !current.natureOfPayments.includes(nature));
     const renamedFrom = removed.length === 1 && added.length === 1 ? removed[0] : undefined;
@@ -1950,15 +1987,23 @@ function Settings({
   const resolvedWorkflowPreview = resolvePrototypeApproval(workflowNature, previewAmount, { [workflowNature]: workflow });
   const diagramTrace = tracePrototypeDiagram(workflow, previewAmount);
   const updateWorkflow = (change: Partial<WorkflowControl>, announce = true) => {
-    onChange((current) => ({ ...current, workflows: { ...current.workflows, [workflowNature]: { ...(current.workflows[workflowNature] ?? defaultWorkflow), ...change } } }));
-    if (announce) notify(`${workflowNature} workflow updated`);
+    setMasterData((current) => ({ ...current, workflows: { ...current.workflows, [workflowNature]: { ...(current.workflows[workflowNature] ?? defaultWorkflow), ...change } } }));
+    if (announce) notify("Unsaved workflow changes");
+  };
+  const applyImportedConfiguration = (next: Partial<MasterData>) => {
+    const importedMasterData = normalizeMasterData({ ...savedMasterData, ...next });
+    setMasterData(importedMasterData);
+    setDraftRevision((revision) => revision + 1);
+    onChange(importedMasterData);
   };
   const renderConfigurationEditor = (type: PrototypeConfigType) => {
-    if (type === "projects") return <MasterDataEditor icon="P" title="Project Codes" singular="project code" description="Used to classify spending by project or business unit." values={masterData.projects} onChange={(values) => updateList("projects", values)} notify={notify} configType="projects" profileId={profileId} onImported={(next) => onChange((current) => normalizeMasterData({ ...current, ...next }))}/>;
-    if (type === "accounts") return <MasterDataEditor icon="A" title="Accounts" singular="account" description="Controls the accounting categories available on line items." values={masterData.accounts} onChange={(values) => updateList("accounts", values)} projectCodes={masterData.projects} accountProjectCodes={masterData.accountProjectCodes} onAccountProjectCodesChange={(account, projectCodes) => onChange((current) => ({ ...current, accountProjectCodes: { ...current.accountProjectCodes, [account]: projectCodes } }))} notify={notify} configType="accounts" profileId={profileId} onImported={(next) => onChange((current) => normalizeMasterData({ ...current, ...next }))}/>;
-    if (type === "payees") return <MasterDataEditor icon="V" title="Payees / Vendors" singular="payee or vendor" description="Choose which currency each vendor accepts. Both keeps them available for PHP and USD requests." values={masterData.payees} onChange={(values) => updateList("payees", values)} vendorCurrencies={masterData.vendorCurrencies} onVendorCurrencyChange={updateVendorCurrency} notify={notify} configType="payees" profileId={profileId} onImported={(next) => onChange((current) => normalizeMasterData({ ...current, ...next }))}/>;
-    return <MasterDataEditor icon="N" title="Nature of Payment" singular="payment type" description="Controls the payment categories available on new requests and their workflow settings." values={masterData.natureOfPayments} onChange={updateNatureOptions} notify={notify} configType="natureOfPayments" profileId={profileId} onImported={(next) => onChange((current) => normalizeMasterData({ ...current, ...next }))}/>;
+    const editorProps = { key: `${type}-${draftRevision}`, profileId, notify, canCommitImport: !hasUnsavedChanges, onImported: applyImportedConfiguration };
+    if (type === "projects") return <MasterDataEditor {...editorProps} icon="P" title="Project Codes" singular="project code" description="Used to classify spending by project or business unit." values={masterData.projects} onChange={(values) => updateList("projects", values)} configType="projects"/>;
+    if (type === "accounts") return <MasterDataEditor {...editorProps} icon="A" title="Accounts" singular="account" description="Controls the accounting categories available on line items." values={masterData.accounts} onChange={(values) => updateList("accounts", values)} projectCodes={masterData.projects} accountProjectCodes={masterData.accountProjectCodes} onAccountProjectCodesChange={(account, projectCodes) => { setMasterData((current) => ({ ...current, accountProjectCodes: { ...current.accountProjectCodes, [account]: projectCodes } })); notify("Unsaved account Project Code changes"); }} configType="accounts"/>;
+    if (type === "payees") return <MasterDataEditor {...editorProps} icon="V" title="Payees / Vendors" singular="payee or vendor" description="Choose which currency each vendor accepts. Both keeps them available for PHP and USD requests." values={masterData.payees} onChange={(values) => updateList("payees", values)} vendorCurrencies={masterData.vendorCurrencies} onVendorCurrencyChange={updateVendorCurrency} configType="payees"/>;
+    return <MasterDataEditor {...editorProps} icon="N" title="Nature of Payment" singular="payment type" description="Controls the payment categories available on new requests and their workflow settings." values={masterData.natureOfPayments} onChange={updateNatureOptions} configType="natureOfPayments"/>;
   };
+  const settingsSaveLabel = hasUnsavedChanges ? "Unsaved changes" : saveRequested ? saveStatus === "offline" ? "Save failed" : "Saving settings…" : "All settings saved";
 
   return (
     <>
@@ -1982,8 +2027,12 @@ function Settings({
         <Metric label="Payees / vendors" value={masterData.payees.length} />
         <Metric label="Payment types" value={masterData.natureOfPayments.length} />
       </div>
+      <section className={`settings-savebar${hasUnsavedChanges ? " pending" : ""}`} aria-live="polite">
+        <div className="settings-save-status"><span className={`settings-save-dot ${hasUnsavedChanges ? "pending" : saveStatus}`}/><div><strong>{settingsSaveLabel}</strong><small>{hasUnsavedChanges ? "Review your edits, then choose Save Settings to commit them." : saveStatus === "saving" ? "Waiting for the database to confirm your changes." : "Settings are stored in the shared database."}</small></div></div>
+        <div className="actions"><button type="button" className="button secondary" disabled={!hasUnsavedChanges || saveStatus === "saving" || saveRequested} onClick={() => { setMasterData(savedMasterData); setDraftRevision((revision) => revision + 1); notify("Unsaved settings changes discarded"); }}>Discard</button><button type="button" className="button" disabled={!hasUnsavedChanges || saveStatus === "saving" || saveRequested} onClick={() => { setSaveRequested(true); onSave(masterData); }}>{saveRequested || saveStatus === "saving" ? "Saving…" : "Save Settings"}</button></div>
+      </section>
       <section className="workflow-settings-card">
-        <header className="workflow-settings-head"><div><span className="eyebrow">Approval process controls</span><h2>Workflow by Nature of Payment</h2><p>Select a payment type and define the stages a new or resubmitted request must follow.</p></div><span className="badge green">Auto-saved</span></header>
+        <header className="workflow-settings-head"><div><span className="eyebrow">Approval process controls</span><h2>Workflow by Nature of Payment</h2><p>Select a payment type and define the stages a new or resubmitted request must follow.</p></div><span className="badge">{settingsSaveLabel}</span></header>
         <div className="workflow-settings-layout">
           <div className="field"><label>NATURE OF PAYMENT</label><select aria-label="NATURE OF PAYMENT" value={workflowNature} onChange={(event) => setWorkflowNature(event.target.value)}>{masterData.natureOfPayments.map((nature) => <option key={nature}>{nature}</option>)}</select></div>
           <div className="workflow-control-list">
@@ -2006,7 +2055,7 @@ function Settings({
         {renderConfigurationEditor("natureOfPayments")}
       </section>
       <p className="settings-footnote">
-        Changes save automatically. Workflow changes apply to new submissions and resubmissions; in-progress requests keep their submitted route.
+        Editor changes are staged until you select Save Settings; bulk imports are committed only after you confirm the import. Workflow changes apply to new submissions and resubmissions; in-progress requests keep their submitted route.
       </p>
     </>
   );
@@ -2128,6 +2177,7 @@ function MasterDataEditor({
   configType,
   profileId,
   onImported,
+  canCommitImport = true,
   projectCodes,
   accountProjectCodes,
   onAccountProjectCodesChange,
@@ -2145,6 +2195,7 @@ function MasterDataEditor({
   configType: PrototypeConfigType;
   profileId: string;
   onImported: (masterData: Partial<MasterData>) => void;
+  canCommitImport?: boolean;
   projectCodes?: string[];
   accountProjectCodes?: AccountProjectMap;
   onAccountProjectCodesChange?: (account: string, projectCodes: string[]) => void;
@@ -2171,7 +2222,7 @@ function MasterDataEditor({
     if (duplicate(value)) return notify(`${value} already exists`);
     onChange([...values, value]);
     setDraft("");
-    notify(`${value} added`);
+    notify(`${value} added; not saved yet`);
   };
   const saveEdit = (index: number) => {
     const value = editValue.trim();
@@ -2179,14 +2230,14 @@ function MasterDataEditor({
     if (duplicate(value, index)) return notify(`${value} already exists`);
     onChange(values.map((item, itemIndex) => itemIndex === index ? value : item));
     setEditing(null);
-    notify(`${singular} updated`);
+    notify(`${singular} updated; not saved yet`);
   };
   const remove = (index: number) => {
     const value = values[index];
     if (values.length === 1) return notify(`Keep at least one ${singular}`);
     onChange(values.filter((_, itemIndex) => itemIndex !== index));
     if (editing === index) setEditing(null);
-    notify(`${value} removed`);
+    notify(`${value} removed; not saved yet`);
   };
   const downloadFile = (filename: string, content: string) => {
     const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
@@ -2253,7 +2304,7 @@ function MasterDataEditor({
       const result = await response.json() as { error?: string; importedRecords?: number; masterData?: Partial<MasterData> };
       if (!response.ok || !result.masterData) throw new Error(result.error ?? "Could not import these records");
       onImported(result.masterData);
-      notify(`${result.importedRecords ?? 0} ${singular}${result.importedRecords === 1 ? "" : "s"} imported; existing, duplicate, and invalid rows were skipped`);
+      notify(`${result.importedRecords ?? 0} ${singular}${result.importedRecords === 1 ? "" : "s"} imported and saved; existing, duplicate, and invalid rows were skipped`);
       setImportPreview(null);
       setImportCsv("");
       setImportOpen(false);
@@ -2272,10 +2323,11 @@ function MasterDataEditor({
         <span className="master-count">{values.length}</span>
       </header>
       <div className="master-tools">
-        <button className="button secondary" type="button" onClick={() => { setImportOpen((open) => !open); setImportPreview(null); setImportCsv(""); }}>Bulk Import</button>
+        <button className="button secondary" type="button" disabled={!canCommitImport} title={!canCommitImport ? "Save or discard pending settings before importing" : undefined} onClick={() => { setImportOpen((open) => !open); setImportPreview(null); setImportCsv(""); }}>Bulk Import</button>
         <button className="button secondary" type="button" onClick={downloadTemplate}>Download Template</button>
         <button className="button secondary" type="button" onClick={() => void exportCurrent()}>Export</button>
       </div>
+      {!canCommitImport && <small className="master-import-note">Save or discard your pending settings changes before starting a bulk import.</small>}
       {importOpen && <section className="master-import-panel" aria-label={`${prototypeConfigDefinitions[configType].title} bulk import`}>
         <div className="master-import-heading"><strong>Import {prototypeConfigDefinitions[configType].title}</strong><button className="text-button" type="button" onClick={() => { setImportOpen(false); setImportPreview(null); }}>Close</button></div>
         <p>Upload a CSV using these columns: <span>{prototypeConfigDefinitions[configType].headers.join(", ")}</span>. Import only adds new records; existing items are never overwritten. Empty rows are skipped.</p>
@@ -2290,7 +2342,7 @@ function MasterDataEditor({
           {(importPreview.invalidRecords > 0 || importPreview.duplicateRecords > 0 || importPreview.existingRecords > 0) && <button className="text-button import-errors-toggle" type="button" onClick={() => setShowImportDetails((show) => !show)}>{showImportDetails ? "Hide row details" : "View Errors & Skipped Rows"}</button>}
           {showImportDetails && <div className="import-row-details">{importPreview.rows.filter((row) => row.status !== "new" && row.status !== "empty").map((row) => <div className={`import-row-detail ${row.status}`} key={`${row.rowNumber}-${row.label}`}><strong>Row {row.rowNumber}: {row.label}</strong><span>{row.message}</span></div>)}</div>}
           <p className="master-import-confirm-note">Confirm adds only the {importPreview.validRecords} valid new {importPreview.validRecords === 1 ? "record" : "records"}. All other rows shown above remain unchanged.</p>
-          <div className="master-import-actions"><button className="button secondary" type="button" disabled={importBusy} onClick={() => { setImportPreview(null); setImportCsv(""); }}>Cancel</button><button className="button" type="button" disabled={importBusy || importPreview.validRecords === 0} onClick={() => void confirmImport()}>{importBusy ? "Importing…" : `Confirm Import (${importPreview.validRecords})`}</button></div>
+          <div className="master-import-actions"><button className="button secondary" type="button" disabled={importBusy} onClick={() => { setImportPreview(null); setImportCsv(""); }}>Cancel</button><button className="button" type="button" disabled={importBusy || !canCommitImport || importPreview.validRecords === 0} onClick={() => void confirmImport()}>{importBusy ? "Importing…" : `Confirm Import (${importPreview.validRecords})`}</button></div>
         </div>}
       </section>}
       <div className="master-add">
@@ -2321,7 +2373,7 @@ function MasterDataEditor({
             {vendorCurrencies && onVendorCurrencyChange && <select aria-label={`Currency availability for ${value}`} value={vendorCurrencies[value] ?? "BOTH"} onChange={(event) => onVendorCurrencyChange(value, event.target.value as VendorCurrency)}><option value="PHP">PHP only</option><option value="USD">USD only</option><option value="BOTH">PHP &amp; USD</option></select>}
             <div className="master-row-actions">
               {editing === index ? <>
-                <button type="button" onClick={() => saveEdit(index)}>Save</button>
+                <button type="button" onClick={() => saveEdit(index)}>Apply</button>
                 <button type="button" onClick={() => setEditing(null)}>Cancel</button>
               </> : <>
                 {allowEdit && <button type="button" onClick={() => { setEditing(index); setEditValue(value); }}>Edit</button>}
@@ -2329,7 +2381,7 @@ function MasterDataEditor({
                 <button className="danger-link" type="button" onClick={() => remove(index)}>Remove</button>
               </>}
             </div>
-            {configType === "accounts" && expandedAccount === value && projectCodes && accountProjectCodes && onAccountProjectCodesChange && <div className="account-project-editor"><div className="account-project-heading"><strong>Applicable Project Codes</strong><span>{projectCodeDraft.length} selected</span></div><div className="account-project-actions"><button type="button" onClick={() => setProjectCodeDraft([...projectCodes])}>Select All</button><button type="button" onClick={() => setProjectCodeDraft([])}>Clear All</button></div><div className="account-project-options">{projectCodes.map((project) => <label key={project}><input type="checkbox" checked={projectCodeDraft.includes(project)} onChange={(event) => setProjectCodeDraft((current) => event.target.checked ? [...current, project] : current.filter((item) => item !== project))}/><span>{project}</span></label>)}</div><p className="account-project-help">Only checked Project Codes will show this account in New Request. The list follows your Project Codes order.</p><button type="button" className="button" onClick={() => { onAccountProjectCodesChange(value, projectCodeDraft); notify(`Applicable Project Codes saved for ${value}`); }}>Save</button></div>}
+            {configType === "accounts" && expandedAccount === value && projectCodes && accountProjectCodes && onAccountProjectCodesChange && <div className="account-project-editor"><div className="account-project-heading"><strong>Applicable Project Codes</strong><span>{projectCodeDraft.length} selected</span></div><div className="account-project-actions"><button type="button" onClick={() => setProjectCodeDraft([...projectCodes])}>Select All</button><button type="button" onClick={() => setProjectCodeDraft([])}>Clear All</button></div><div className="account-project-options">{projectCodes.map((project) => <label key={project}><input type="checkbox" checked={projectCodeDraft.includes(project)} onChange={(event) => setProjectCodeDraft((current) => event.target.checked ? [...current, project] : current.filter((item) => item !== project))}/><span>{project}</span></label>)}</div><p className="account-project-help">Only checked Project Codes will show this account in New Request. The list follows your Project Codes order.</p><button type="button" className="button" onClick={() => { onAccountProjectCodesChange(value, projectCodeDraft); notify("Project Code assignments staged; save Settings to commit them"); }}>Apply</button></div>}
           </div>
         ))}
       </div>

@@ -2214,6 +2214,32 @@
   margin-bottom: 18px;
 }
 .settings-summary .metric { min-height: 104px; }
+.settings-savebar {
+  position: sticky;
+  top: 82px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 18px;
+  padding: 13px 16px;
+  border: 1px solid rgba(28, 43, 68, .1);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, .94);
+  box-shadow: 0 10px 28px rgba(28, 43, 68, .08);
+  backdrop-filter: blur(18px);
+}
+.settings-savebar.pending { border-color: rgba(187, 119, 18, .3); background: rgba(255, 250, 238, .96); }
+.settings-save-status { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.settings-save-status > div { display: grid; gap: 3px; }
+.settings-save-status strong { font-size: .82rem; }
+.settings-save-status small { color: var(--muted); font-size: .72rem; }
+.settings-save-dot { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #24a468; box-shadow: 0 0 0 4px rgba(36, 164, 104, .12); }
+.settings-save-dot.pending, .settings-save-dot.saving, .settings-save-dot.loading { background: #d79522; box-shadow: 0 0 0 4px rgba(215, 149, 34, .14); }
+.settings-save-dot.offline { background: #d04747; box-shadow: 0 0 0 4px rgba(208, 71, 71, .12); }
+.settings-savebar .actions { flex: 0 0 auto; }
+.settings-savebar .button:disabled { opacity: .48; cursor: not-allowed; }
 .audit-trail-card { margin-top: 18px; }
 .audit-change-summary { min-width: 280px; max-width: 460px; }
 .audit-change-summary span { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: .72rem; line-height: 1.5; }
@@ -2717,6 +2743,8 @@
     align-items: flex-start;
     flex-direction: column;
   }
+  .settings-savebar { align-items: stretch; flex-direction: column; top: 126px; }
+  .settings-savebar .actions { display: grid; grid-template-columns: 1fr 1fr; }
   .settings-access {
     width: 100%;
   }
