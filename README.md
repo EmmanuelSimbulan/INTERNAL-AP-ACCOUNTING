@@ -54,6 +54,7 @@ Set production secrets through the platform secret store, terminate TLS at the i
 
 ## Documentation
 
+- [docs/application-features.md](docs/application-features.md) — end-to-end guide to the app's request, workflow, settings, import/export, notifications, audit, and reporting features.
 - `docs/architecture.md`
 - `docs/data-model.md`
 - `docs/workflow.md`
