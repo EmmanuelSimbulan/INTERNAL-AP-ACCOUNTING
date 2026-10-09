@@ -95,7 +95,7 @@ function databaseUnavailable(error: unknown) {
     code: quotaExceeded ? "DATABASE_QUOTA_EXCEEDED" : "DATABASE_UNAVAILABLE",
     error: quotaExceeded
       ? "The shared Neon database has reached its plan quota. Saved data is intact. The Neon project owner must restore quota or upgrade the plan; resetting the database will not resolve a quota limit."
-      : "The shared database is temporarily unavailable. Saved data has not been changed; retry after the database connection is restored.",
+      : "The shared database cannot currently be reached. Saved data has not changed. Ask the Neon project owner to check quota and compute status, then retry; resetting the database will not fix a connection issue.",
   }, { status: 503, headers: { "Cache-Control": "no-store" } });
 }
 
