@@ -1,23 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { parseBspDailyUsdPhp, signBspUsdPhpRate, verifyBspUsdPhpRate } from "@/lib/bsp-fx";
+import { normalizeBspUsdPhpRate, signBspUsdPhpRate, verifyBspUsdPhpRate } from "@/lib/bsp-fx";
 
 describe("parseBspDailyUsdPhp", () => {
-  it("returns the latest published BSP rate not later than today", () => {
-    const html = `<table>
-      <tr><th>Date</th><th>Sep-26</th><th>Oct-26</th></tr>
-      <tr><td>8</td><td>62.698</td><td>62.766</td></tr>
-      <tr><td>9</td><td>62.568</td><td></td></tr>
-    </table>`;
-    expect(parseBspDailyUsdPhp(html, "2026-10-09")).toMatchObject({
-      rate: "62.766",
-      effectiveDate: "2026-10-08",
-      source: "https://www.bsp.gov.ph/statistics/external/day99_data.aspx",
-    });
-    expect(parseBspDailyUsdPhp(html, "2026-10-07")?.effectiveDate).toBe("2026-09-09");
+  it("inverts the PHP-base BSP quote to a four-decimal PHP-per-USD rate", () => {
+    expect(normalizeBspUsdPhpRate(1 / 62.893)).toBe("62.8930");
   });
 
-  it("returns null for a page without rate data", () => {
-    expect(parseBspDailyUsdPhp("<html>unavailable</html>", "2026-10-09")).toBeNull();
+  it("rejects invalid reciprocal rates", () => {
+    expect(() => normalizeBspUsdPhpRate(0)).toThrow("Invalid BSP USD/PHP rate");
   });
 
   it("signs a quote so the state API can reject altered rates", () => {

@@ -1,38 +1,24 @@
 import { NextResponse } from "next/server";
-import { parseBspDailyUsdPhp, signBspUsdPhpRate } from "@/lib/bsp-fx";
+import { normalizeBspUsdPhpRate, signBspUsdPhpRate } from "@/lib/bsp-fx";
 
 export const dynamic = "force-dynamic";
 
 async function getBspProviderRate() {
   const response = await fetch("https://api.frankfurter.dev/v2/providers/bsp/rate/php/usd", {
     headers: { Accept: "application/json" },
-    next: { revalidate: 900 },
+    cache: "no-store",
     signal: AbortSignal.timeout(8_000),
   });
   if (!response.ok) throw new Error(`BSP rate mirror returned HTTP ${response.status}`);
   const value = await response.json() as { date?: string; rate?: number };
-  if (!value.date || !Number.isFinite(value.rate) || !value.rate || value.rate <= 0) throw new Error("BSP rate mirror returned an invalid rate");
-  // The provider publishes PHP as the base; invert it to retain BSP's USD→PHP quote.
-  return { rate: (1 / value.rate!).toFixed(3), effectiveDate: value.date, source: "https://www.bsp.gov.ph/statistics/external/day99_data.aspx" };
+  if (!value.date || !Number.isFinite(value.rate) || !value.rate || value.rate <= 0) throw new Error("BSP reference-rate feed returned an invalid rate");
+  // Query the BSP provider with PHP as base; invert its PHP/USD quote to USD/PHP.
+  return { rate: normalizeBspUsdPhpRate(value.rate), effectiveDate: value.date, source: "https://www.bsp.gov.ph/SitePages/Statistics/DailyRERB.aspx" };
 }
 
 export async function GET() {
   try {
-    let quote;
-    try {
-      const response = await fetch("https://www.bsp.gov.ph/statistics/external/day99_data.aspx", {
-        headers: { Accept: "text/html", "User-Agent": "Mozilla/5.0 (compatible; APWorkflow/1.0)" },
-        next: { revalidate: 900 },
-        signal: AbortSignal.timeout(12_000),
-      });
-      if (!response.ok) throw new Error(`BSP returned HTTP ${response.status}`);
-      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-      quote = parseBspDailyUsdPhp(await response.text(), today);
-    } catch (error) {
-      console.warn("Direct BSP rate page unavailable; trying BSP provider dataset", error);
-      quote = await getBspProviderRate();
-    }
-    if (!quote) throw new Error("No published USD/PHP rate was found on BSP's daily rate page");
+    const quote = await getBspProviderRate();
     return NextResponse.json(signBspUsdPhpRate({ ...quote, retrievedAt: new Date().toISOString() }), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error("BSP USD/PHP lookup failed", error);

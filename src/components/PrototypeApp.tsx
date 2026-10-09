@@ -1683,7 +1683,7 @@ function NewRequest({
           <Field label="BSP RATE EFFECTIVE DATE">
             <input readOnly value={fxQuote?.effectiveDate ?? "—"} />
           </Field>
-          {fxQuote && <p className="muted">Official BSP daily USD/PHP rate. PHP equivalent: {cash(total(lines) * Number(fxQuote.rate), "PHP")} · Retrieved {new Date(fxQuote.retrievedAt).toLocaleString()}.</p>}
+          {fxQuote && <p className="muted">BSP Reference Exchange Rate Bulletin (RERB). PHP equivalent: {cash(total(lines) * Number(fxQuote.rate), "PHP")} · Retrieved {new Date(fxQuote.retrievedAt).toLocaleString()}.</p>}
           {fxError && <p className="document-error" role="alert">{fxError}</p>}
         </div>}
         <section className="nature-section"><div><span className="eyebrow">Payment classification</span><h2>NATURE OF PAYMENT</h2><p className="muted">Choose the category that best describes this request.</p></div><NaturePicker value={nature} options={natureOptions} onChange={setNature}/></section>
@@ -1971,7 +1971,7 @@ function Details({
             <dd>
               {request.date} · {request.currency}
             </dd>
-            {request.currency === "USD" && <><dt>BSP USD → PHP RATE</dt><dd>{request.fxRate && request.fxRateDate ? `₱${request.fxRate} per USD · effective ${request.fxRateDate}` : "No BSP rate snapshot recorded for this legacy request"}</dd>{request.fxRate && <><dt>PHP EQUIVALENT</dt><dd>{cash(total(request.lines) * Number(request.fxRate), "PHP")}</dd><dt>RATE SOURCE</dt><dd><a href={request.fxRateSource ?? "https://www.bsp.gov.ph/statistics/external/day99_data.aspx"} target="_blank" rel="noreferrer">Bangko Sentral ng Pilipinas daily USD/PHP rate</a></dd></>}</>}
+            {request.currency === "USD" && <><dt>BSP USD → PHP RATE</dt><dd>{request.fxRate && request.fxRateDate ? `₱${request.fxRate} per USD · effective ${request.fxRateDate}` : "No BSP rate snapshot recorded for this legacy request"}</dd>{request.fxRate && <><dt>PHP EQUIVALENT</dt><dd>{cash(total(request.lines) * Number(request.fxRate), "PHP")}</dd><dt>RATE SOURCE</dt><dd><a href={request.fxRateSource ?? "https://www.bsp.gov.ph/SitePages/Statistics/DailyRERB.aspx"} target="_blank" rel="noreferrer">BSP Reference Exchange Rate Bulletin (RERB)</a></dd></>}</>}
             <dt>INVOICE NUMBER</dt>
             <dd>
               {request.invoiceNumber ??
