@@ -87,6 +87,18 @@ const stateSchema = z.object({
   masterData: masterDataSchema,
 });
 
+function databaseUnavailable(error: unknown) {
+  console.error("Prototype workspace database request failed", error);
+  const message = error instanceof Error ? error.message : String(error);
+  const quotaExceeded = /quota/i.test(message);
+  return NextResponse.json({
+    code: quotaExceeded ? "DATABASE_QUOTA_EXCEEDED" : "DATABASE_UNAVAILABLE",
+    error: quotaExceeded
+      ? "The shared Neon database has reached its plan quota. Saved data is intact. The Neon project owner must restore quota or upgrade the plan; resetting the database will not resolve a quota limit."
+      : "The shared database is temporarily unavailable. Saved data has not been changed; retry after the database connection is restored.",
+  }, { status: 503, headers: { "Cache-Control": "no-store" } });
+}
+
 function requestAuditSummary(row: z.infer<typeof requestSchema>) {
   return {
     number: row.number,
@@ -106,13 +118,17 @@ function requestAuditSummary(row: z.infer<typeof requestSchema>) {
 }
 
 export async function GET() {
-  const workspace = await db.prototypeWorkspace.findUnique({
-    where: { id: "default" },
-    select: { requests: true, masterData: true, updatedAt: true },
-  });
-  return NextResponse.json(workspace ?? null, {
-    headers: { "Cache-Control": "no-store" },
-  });
+  try {
+    const workspace = await db.prototypeWorkspace.findUnique({
+      where: { id: "default" },
+      select: { requests: true, masterData: true, updatedAt: true },
+    });
+    return NextResponse.json(workspace ?? null, {
+      headers: { "Cache-Control": "no-store" },
+    });
+  } catch (error) {
+    return databaseUnavailable(error);
+  }
 }
 
 export async function PUT(request: Request) {
@@ -123,6 +139,7 @@ export async function PUT(request: Request) {
       { status: 400 },
     );
   }
+  try {
   const profile = demoProfiles.find((item) => item.id === parsed.data.profileId);
   if (!profile) return NextResponse.json({ error: "Unknown profile" }, { status: 403 });
 
@@ -232,4 +249,7 @@ export async function PUT(request: Request) {
     }
   }
   return NextResponse.json(saved);
+  } catch (error) {
+    return databaseUnavailable(error);
+  }
 }

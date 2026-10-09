@@ -89,6 +89,15 @@ async function fetchBspUsdPhpRate(): Promise<FxQuote> {
   if (!response.ok) throw new Error(result.error ?? "Could not retrieve the BSP exchange rate.");
   return result as FxQuote;
 }
+async function sharedDatabaseError(response: Response, fallback: string) {
+  const result = await response.json().catch(() => null) as { error?: unknown } | null;
+  return typeof result?.error === "string" ? result.error : fallback;
+}
+function databaseErrorFrom(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.startsWith("DATABASE:")
+    ? error.message.slice("DATABASE:".length)
+    : fallback;
+}
 type RequestSort = "newest" | "oldest" | "company-asc" | "company-desc";
 type BulkRequestFields = Partial<Pick<Req, "company" | "payee" | "nature" | "date" | "invoiceNumber">>;
 const requestSortOptions: Array<{ value: RequestSort; label: string }> = [
@@ -535,7 +544,7 @@ export function PrototypeApp() {
     const loadDatabaseState = async () => {
       try {
         const response = await fetch("/api/prototype/state", { cache: "no-store" });
-        if (!response.ok) throw new Error(`Database returned ${response.status}`);
+        if (!response.ok) throw new Error(`DATABASE:${await sharedDatabaseError(response, `Database returned ${response.status}`)}`);
         const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData>; updatedAt?: string };
         serverUpdatedAtRef.current = saved?.updatedAt ?? null;
         const savedRows = (saved?.requests ?? []).map(normalizeRequestWorkflow);
@@ -548,7 +557,7 @@ export function PrototypeApp() {
         console.error("Prototype database load failed", error);
         setRows([]);
         setSelected("");
-        setSyncError("The shared database could not be reached. Changes will not be saved until you reconnect.");
+        setSyncError(databaseErrorFrom(error, "The shared database could not be reached. Changes will not be saved until you reconnect."));
         setSyncStatus("offline");
       } finally {
         setDatabaseHydrated(true);
@@ -583,7 +592,7 @@ export function PrototypeApp() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ profileId: activeProfileId, rows: databaseRows, masterData }),
         });
-        if (!response.ok) throw new Error(`Database returned ${response.status}`);
+        if (!response.ok) throw new Error(`DATABASE:${await sharedDatabaseError(response, `Database returned ${response.status}`)}`);
         const saved = await response.json() as { updatedAt?: string; changed?: boolean };
         if (!saved.updatedAt) throw new Error("Database did not confirm the save");
         serverUpdatedAtRef.current = saved.updatedAt;
@@ -597,7 +606,7 @@ export function PrototypeApp() {
         }
       } catch (error) {
         console.error("Prototype database save failed", error);
-        setSyncError("The latest changes were not saved. Reconnect to load the last saved data.");
+        setSyncError(databaseErrorFrom(error, "The latest changes were not saved. Reconnect to load the last saved data."));
         setSyncStatus("offline");
         if (pendingSaveNoticeRef.current && pendingMasterDataRollbackRef.current) {
           setMasterData(pendingMasterDataRollbackRef.current);
@@ -618,7 +627,7 @@ export function PrototypeApp() {
       try {
         const response = await fetch("/api/prototype/state", { cache: "no-store" });
         if (!response.ok) {
-          setSyncError("The shared database connection was lost. Reconnect before continuing UAT.");
+          setSyncError(await sharedDatabaseError(response, "The shared database connection was lost. Reconnect before continuing UAT."));
           setSyncStatus("offline");
           return;
         }
@@ -641,10 +650,19 @@ export function PrototypeApp() {
         checking = false;
       }
     };
-    const timer = window.setInterval(() => void refreshSharedState(), 3000);
+    // Neon suspends idle computes after several minutes. A three-second poll kept
+    // the shared database awake continuously and exhausted the project's quota.
+    const timer = window.setInterval(() => void refreshSharedState(), 15 * 60 * 1000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshSharedState();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       active = false;
       window.clearInterval(timer);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, [databaseHydrated, syncStatus]);
   const current = rows.find((r) => r.id === selected),
@@ -652,7 +670,7 @@ export function PrototypeApp() {
       setSyncStatus("loading");
       try {
         const response = await fetch("/api/prototype/state", { cache: "no-store" });
-        if (!response.ok) throw new Error(`Database returned ${response.status}`);
+        if (!response.ok) throw new Error(`DATABASE:${await sharedDatabaseError(response, `Database returned ${response.status}`)}`);
         const saved = await response.json() as null | { requests: Req[]; masterData: Partial<MasterData>; updatedAt?: string };
         const savedRows = (saved?.requests ?? []).map(normalizeRequestWorkflow);
         serverUpdatedAtRef.current = saved?.updatedAt ?? null;
@@ -663,7 +681,7 @@ export function PrototypeApp() {
         setSyncStatus("synced");
       } catch (error) {
         console.error("Prototype database reconnect failed", error);
-        setSyncError("Could not reconnect to the shared database. Your last saved data is unchanged; try again.");
+        setSyncError(databaseErrorFrom(error, "Could not reconnect to the shared database. Your last saved data is unchanged; try again."));
         setSyncStatus("offline");
       }
     },
