@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { demoProfiles } from "@/lib/demo-profiles";
 import { accountIsApplicable } from "@/lib/prototype-project-account";
+import { verifyBspUsdPhpRate } from "@/lib/bsp-fx";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +31,7 @@ const requestSchema = z.object({
   fxRateDate: z.string().date().optional(),
   fxRateSource: z.string().url().refine((value) => new URL(value).hostname === "www.bsp.gov.ph", "FX source must be BSP").optional(),
   fxRateRetrievedAt: z.string().datetime().optional(),
+  fxRateSignature: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   nature: z.string().max(500),
   other: z.string().max(500),
   status: z.string().max(100),
@@ -147,8 +149,11 @@ export async function PUT(request: Request) {
         const baselineRows = new Map(rowsById);
         for (const row of parsed.data.rows) {
           const previous = baselineRows.get(row.id);
-          if (row.currency === "USD" && (!previous || previous.currency !== "USD") && (!row.fxRate || !row.fxRateDate || !row.fxRateSource || !row.fxRateRetrievedAt)) {
-            throw new Error(`USD_RATE_REQUIRED:${row.number}`);
+          const fxSnapshotChanged = !previous || previous.currency !== "USD" || JSON.stringify([previous.fxRate, previous.fxRateDate, previous.fxRateSource, previous.fxRateRetrievedAt, previous.fxRateSignature]) !== JSON.stringify([row.fxRate, row.fxRateDate, row.fxRateSource, row.fxRateRetrievedAt, row.fxRateSignature]);
+          if (row.currency === "USD" && fxSnapshotChanged) {
+            if (!row.fxRate || Number(row.fxRate) <= 0 || !row.fxRateDate || !row.fxRateSource || !row.fxRateRetrievedAt || !row.fxRateSignature || !verifyBspUsdPhpRate({ rate: row.fxRate, effectiveDate: row.fxRateDate, source: row.fxRateSource, retrievedAt: row.fxRateRetrievedAt, signature: row.fxRateSignature })) {
+              throw new Error(`USD_RATE_REQUIRED:${row.number}`);
+            }
           }
           const priorPairCounts = new Map<string, number>();
           for (const line of previous?.lines ?? []) {
@@ -220,7 +225,7 @@ export async function PUT(request: Request) {
         return NextResponse.json({ error: `${details.account} is not configured for Project Code ${details.project} (line ${details.lineNumber}).` }, { status: 400 });
       }
       if (error instanceof Error && error.message.startsWith("USD_RATE_REQUIRED:")) {
-        return NextResponse.json({ error: "A current BSP USD/PHP conversion rate and effective date are required for new USD requests." }, { status: 400 });
+        return NextResponse.json({ error: "A valid server-verified BSP USD/PHP conversion rate and effective date are required for new or changed USD requests." }, { status: 400 });
       }
       const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
       if (code !== "P2034" || attempt === 2) throw error;

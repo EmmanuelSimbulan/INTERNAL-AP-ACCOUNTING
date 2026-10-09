@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { parseBspDailyUsdPhp } from "@/lib/bsp-fx";
+import { parseBspDailyUsdPhp, signBspUsdPhpRate } from "@/lib/bsp-fx";
 
 export const dynamic = "force-dynamic";
 
@@ -33,7 +33,7 @@ export async function GET() {
       quote = await getBspProviderRate();
     }
     if (!quote) throw new Error("No published USD/PHP rate was found on BSP's daily rate page");
-    return NextResponse.json({ ...quote, retrievedAt: new Date().toISOString() }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(signBspUsdPhpRate({ ...quote, retrievedAt: new Date().toISOString() }), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error("BSP USD/PHP lookup failed", error);
     return NextResponse.json({ error: "The official BSP USD/PHP rate is temporarily unavailable. Please try again before saving this USD request." }, { status: 503, headers: { "Cache-Control": "no-store" } });

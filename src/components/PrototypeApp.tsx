@@ -66,6 +66,7 @@ type Req = {
   fxRateDate?: string;
   fxRateSource?: string;
   fxRateRetrievedAt?: string;
+  fxRateSignature?: string;
   nature: string;
   other: string;
   status: Status;
@@ -81,7 +82,7 @@ type Req = {
   requireApValidation?: boolean;
   statusHistory?: StatusCheckpoint[];
 };
-type FxQuote = { rate: string; effectiveDate: string; source: string; retrievedAt: string };
+type FxQuote = { rate: string; effectiveDate: string; source: string; retrievedAt: string; signature: string };
 async function fetchBspUsdPhpRate(): Promise<FxQuote> {
   const response = await fetch("/api/prototype/fx/usd-php", { cache: "no-store" });
   const result = await response.json();
@@ -1521,7 +1522,7 @@ function NewRequest({
         company,
         date: requestDate,
         currency,
-        ...(currency === "USD" && fxQuote ? { fxRate: fxQuote.rate, fxRateDate: fxQuote.effectiveDate, fxRateSource: fxQuote.source, fxRateRetrievedAt: fxQuote.retrievedAt } : {}),
+        ...(currency === "USD" && fxQuote ? { fxRate: fxQuote.rate, fxRateDate: fxQuote.effectiveDate, fxRateSource: fxQuote.source, fxRateRetrievedAt: fxQuote.retrievedAt, fxRateSignature: fxQuote.signature } : {}),
         nature,
         other,
         status: submit ? approval.status : "Draft",
@@ -1862,14 +1863,14 @@ function Details({
     if (operationalEditor && !editReason.trim()) { notify("Enter an edit reason for the audit timeline"); return; }
     const event = requesterRevision ? (resubmit ? "Requester revised fields and resubmitted" : "Requester saved revised draft") : `${role} edited request data · ${editReason.trim()}`;
     const approval = resolvePrototypeApproval(draft.nature, total(draft.lines), workflows);
-    let fxFields: Pick<Req, "fxRate" | "fxRateDate" | "fxRateSource" | "fxRateRetrievedAt"> = {};
+    let fxFields: Pick<Req, "fxRate" | "fxRateDate" | "fxRateSource" | "fxRateRetrievedAt" | "fxRateSignature"> = {};
     if (draft.currency === "USD") {
       if (request.currency === "USD" && request.fxRate && request.fxRateDate && request.fxRateSource) {
-        fxFields = { fxRate: request.fxRate, fxRateDate: request.fxRateDate, fxRateSource: request.fxRateSource, fxRateRetrievedAt: request.fxRateRetrievedAt };
+        fxFields = { fxRate: request.fxRate, fxRateDate: request.fxRateDate, fxRateSource: request.fxRateSource, fxRateRetrievedAt: request.fxRateRetrievedAt, fxRateSignature: request.fxRateSignature };
       } else {
         try {
           const quote = await fetchBspUsdPhpRate();
-          fxFields = { fxRate: quote.rate, fxRateDate: quote.effectiveDate, fxRateSource: quote.source, fxRateRetrievedAt: quote.retrievedAt };
+          fxFields = { fxRate: quote.rate, fxRateDate: quote.effectiveDate, fxRateSource: quote.source, fxRateRetrievedAt: quote.retrievedAt, fxRateSignature: quote.signature };
         } catch (error) {
           notify(error instanceof Error ? error.message : "Could not retrieve the BSP exchange rate.");
           return;
