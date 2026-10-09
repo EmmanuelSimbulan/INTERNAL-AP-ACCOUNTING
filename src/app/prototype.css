@@ -1584,6 +1584,79 @@
 .prototype thead th {
   background: rgba(245, 245, 247, 0.72);
 }
+.request-bulk-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 2px;
+  color: var(--p-secondary);
+  font-size: 11px;
+}
+.request-bulk-toolbar > span { margin-right: auto; }
+.request-select-all { display: inline-flex; align-items: center; gap: 8px; color: var(--p-text); font-weight: 600; }
+.request-select-column { width: 42px; text-align: center; }
+.request-select-column input,
+.request-select-all input,
+.bulk-edit-toggle input { width: 16px; height: 16px; margin: 0; accent-color: #0071e3; vertical-align: middle; }
+.prototype tbody .request-row-selected { background: rgba(0, 113, 227, .055); }
+.inline-request-value {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 0;
+  border: 0; border-radius: 5px; background: transparent; color: inherit; font: inherit;
+  text-align: left; cursor: text;
+}
+.inline-request-value:hover { color: #0066cc; }
+.inline-edit-mark { color: #aaaab0; font-size: 11px; opacity: .62; }
+.inline-request-value:hover .inline-edit-mark { color: #0071e3; opacity: 1; }
+.inline-request-empty { color: #8b8b92; font-style: italic; }
+.inline-request-editor { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; }
+.inline-request-editor input,
+.inline-request-editor select {
+  width: min(190px, 24vw); min-width: 110px; height: 32px; padding: 0 8px;
+  border: 1px solid rgba(0, 113, 227, .4); border-radius: 8px; background: #fff;
+  color: var(--p-text); font: inherit; font-size: 11px;
+}
+.inline-edit-save,
+.inline-edit-cancel { width: 26px; height: 26px; border: 0; border-radius: 8px; background: #eaf4ff; color: #0066cc; font-weight: 700; }
+.inline-edit-cancel { background: #f2f2f4; color: #777; }
+.invoice-inline { display: flex; align-items: center; gap: 4px; }
+.bulk-edit-overlay {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px;
+  background: rgba(24, 28, 36, .3); backdrop-filter: blur(7px);
+}
+.bulk-edit-dialog {
+  width: min(620px, 100%); max-height: min(86vh, 800px); overflow: auto; padding: 24px;
+  border: 1px solid rgba(255, 255, 255, .7); border-radius: 22px;
+  background: rgba(255, 255, 255, .98); box-shadow: 0 25px 90px rgba(0, 0, 0, .23);
+}
+.bulk-edit-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+.bulk-edit-head h2 { margin: 5px 0 7px; font-size: 22px; letter-spacing: -.03em; }
+.bulk-edit-head p { max-width: 460px; margin: 0; color: var(--p-secondary); font-size: 12px; line-height: 1.5; }
+.bulk-edit-fields { display: grid; gap: 8px; }
+.bulk-edit-field {
+  display: grid; grid-template-columns: minmax(150px, .8fr) minmax(0, 1.2fr); align-items: center; gap: 14px;
+  min-height: 52px; padding: 8px 11px; border: 1px solid rgba(0, 0, 0, .06);
+  border-radius: 12px; background: #fafafd;
+}
+.bulk-edit-field.enabled { border-color: rgba(0, 113, 227, .2); background: #f6faff; }
+.bulk-edit-toggle { display: flex; align-items: center; gap: 9px; font-size: 12px; font-weight: 600; }
+.bulk-edit-field > input,
+.bulk-edit-field > select,
+.bulk-edit-reason textarea {
+  width: 100%; min-width: 0; min-height: 38px; padding: 8px 10px;
+  border: 1px solid rgba(28, 43, 68, .13); border-radius: 9px; background: #fff;
+  color: var(--p-text); font: inherit; font-size: 12px;
+}
+.bulk-edit-reason { display: grid; gap: 7px; margin-top: 16px; color: var(--p-text); font-size: 11px; font-weight: 650; }
+.bulk-edit-reason textarea { min-height: 78px; resize: vertical; font-weight: 400; }
+.bulk-edit-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
+.bulk-edit-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+@media (max-width: 720px) {
+  .request-bulk-toolbar { flex-wrap: wrap; }
+  .request-bulk-toolbar > span { flex: 1; }
+  .bulk-edit-dialog { padding: 18px; border-radius: 18px; }
+  .bulk-edit-field { grid-template-columns: 1fr; gap: 8px; }
+}
 .module-rail {
   display: grid;
   gap: 16px;

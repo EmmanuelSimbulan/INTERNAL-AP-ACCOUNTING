@@ -78,6 +78,7 @@ type Req = {
   statusHistory?: StatusCheckpoint[];
 };
 type RequestSort = "newest" | "oldest" | "company-asc" | "company-desc";
+type BulkRequestFields = Partial<Pick<Req, "company" | "payee" | "nature" | "date" | "invoiceNumber">>;
 const requestSortOptions: Array<{ value: RequestSort; label: string }> = [
   { value: "newest", label: "Date: newest to oldest" },
   { value: "oldest", label: "Date: oldest to newest" },
@@ -842,7 +843,24 @@ export function PrototypeApp() {
               notify={notify}
             />
           )}{" "}
-          {view === "queue" && <Queue role={role} rows={rows} open={open} />}{" "}
+          {view === "queue" && <Queue role={role} rows={rows} open={open} payeeOptions={masterData.payees} natureOptions={masterData.natureOfPayments} onEditRequests={async (ids, fields, reason) => {
+            try {
+              const response = await fetch("/api/prototype/requests/bulk", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profileId: activeProfileId, requestIds: ids, fields, reason }) });
+              const result = await response.json() as { error?: string; requests?: Req[]; updatedAt?: string; updatedCount?: number };
+              if (!response.ok) throw new Error(result.error ?? "Could not save request edits.");
+              if (result.requests) {
+                serverUpdatedAtRef.current = result.updatedAt ?? serverUpdatedAtRef.current;
+                applyingRemoteStateRef.current = true;
+                setRows((currentRows) => currentRows.map((row) => result.requests?.find((updated) => updated.id === row.id) ?? row));
+              }
+              const count = result.updatedCount ?? ids.length;
+              notify(`${count} request${count === 1 ? "" : "s"} updated and audited`);
+              return true;
+            } catch (error) {
+              notify(error instanceof Error ? error.message : "Could not save request edits.");
+              return false;
+            }
+          }} />}
           {view === "new" && (
             <NewRequest
               projectCodes={masterData.projects}
@@ -1092,32 +1110,34 @@ function Queue({
   role,
   rows,
   open,
+  payeeOptions,
+  natureOptions,
+  onEditRequests,
 }: {
   role: Role;
   rows: Req[];
   open: (x: string) => void;
+  payeeOptions: string[];
+  natureOptions: string[];
+  onEditRequests: (ids: string[], fields: BulkRequestFields, reason: string) => Promise<boolean>;
 }) {
-  const queueRows =
-    role === "Approver"
-      ? rows.filter((r) => r.status === "Pending Manager Approval")
-      : role.includes("AP")
-        ? rows.filter(
-            (r) =>
-              ![
-                "Draft",
-                "Pending Manager Approval",
-                "Rejected",
-                "Closed",
-              ].includes(r.status),
-          )
-        : rows;
+  const [showAllRequests, setShowAllRequests] = useState(false);
+  const queueRows = role === "Approver"
+    ? rows.filter((r) => r.status === "Pending Manager Approval")
+    : role.includes("AP") && !showAllRequests
+      ? rows.filter((r) => !["Draft", "Pending Manager Approval", "Rejected", "Closed"].includes(r.status))
+      : rows;
   const [search, setSearch] = useState("");
   const [company, setCompany] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [status, setStatus] = useState("");
   const [sortBy, setSortBy] = useState<RequestSort>("newest");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkEditorOpen, setBulkEditorOpen] = useState(false);
+  const editable = ["Administrator", "AP Reviewer", "AP Processor"].includes(role);
   const companies = [...new Set(queueRows.map((request) => request.company).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const allCompanyOptions = [...new Set(rows.map((request) => request.company).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const statuses = [...new Set(queueRows.map((request) => request.status))].sort((a, b) => a.localeCompare(b));
   const query = search.trim().toLocaleLowerCase();
   const filtered = queueRows.filter((request) => {
@@ -1128,6 +1148,21 @@ function Queue({
   const sorted = sortRequests(filtered, sortBy);
   const hasFilters = Boolean(search || company || fromDate || toDate || status);
   const clearFilters = () => { setSearch(""); setCompany(""); setFromDate(""); setToDate(""); setStatus(""); };
+  const selectedVisible = sorted.filter((request) => selectedIds.includes(request.id));
+  const allVisibleSelected = sorted.length > 0 && selectedVisible.length === sorted.length;
+  const toggleAllVisible = () => setSelectedIds((current) => allVisibleSelected
+    ? current.filter((id) => !sorted.some((request) => request.id === id))
+    : [...new Set([...current, ...sorted.map((request) => request.id)])]);
+  const toggleOne = (id: string) => setSelectedIds((current) => current.includes(id) ? current.filter((selectedId) => selectedId !== id) : [...current, id]);
+  const saveInline = (id: string, fields: BulkRequestFields) => onEditRequests([id], fields, "Inline edit from Requests page");
+  const saveBulk = async (fields: BulkRequestFields, reason: string) => {
+    const saved = await onEditRequests(selectedIds, fields, reason);
+    if (saved) {
+      setSelectedIds([]);
+      setBulkEditorOpen(false);
+    }
+    return saved;
+  };
   return (
     <>
       <span className="eyebrow">Action queue</span>
@@ -1174,16 +1209,95 @@ function Queue({
         {hasFilters && <button type="button" className="clear-request-filters" onClick={clearFilters}>Clear filters</button>}
         <p className="request-filter-count">Showing {sorted.length} of {queueRows.length} requests</p>
       </section>
-      <Table rows={sorted} open={open} />
+      {editable && <div className="request-bulk-toolbar">
+        <label className="request-select-all"><input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} aria-label="Select all visible requests" /> Select visible</label>
+        <span>{selectedIds.length ? selectedIds.length + " selected" : "Select requests to edit together"}</span>
+        {role.includes("AP") && <button className="button secondary" type="button" aria-pressed={showAllRequests} onClick={() => setShowAllRequests((current) => !current)}>{showAllRequests ? "Show active queue" : "Show all requests"}</button>}
+        <button className="button" type="button" disabled={!selectedIds.length} onClick={() => setBulkEditorOpen(true)}>Bulk edit{selectedIds.length ? " (" + selectedIds.length + ")" : ""}</button>
+        {selectedIds.length > 0 && <button className="button secondary" type="button" onClick={() => setSelectedIds([])}>Clear selection</button>}
+      </div>}
+      <Table rows={sorted} open={open} editable={editable} selectedIds={selectedIds} onToggleSelected={toggleOne} companies={allCompanyOptions} payeeOptions={payeeOptions} natureOptions={natureOptions} onEditCell={saveInline} />
+      {bulkEditorOpen && <BulkRequestEditor count={selectedIds.length} companyOptions={allCompanyOptions} payeeOptions={payeeOptions} natureOptions={natureOptions} onCancel={() => setBulkEditorOpen(false)} onSave={saveBulk} />}
     </>
   );
 }
-function Table({ rows, open }: { rows: Req[]; open: (x: string) => void }) {
+type EditableRequestField = keyof BulkRequestFields;
+const editableRequestLabels: Record<EditableRequestField, string> = {
+  company: "Company",
+  payee: "Payee / vendor",
+  nature: "Nature of payment",
+  date: "Request date",
+  invoiceNumber: "Invoice number",
+};
+function InlineRequestCell({ value, field, options = [], onSave }: { value: string; field: EditableRequestField; options?: string[]; onSave: (value: string) => Promise<boolean> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (!editing) setDraft(value); }, [editing, value]);
+  if (!editing) return <button className="inline-request-value" type="button" title={"Click to edit " + editableRequestLabels[field]} onClick={(event) => { event.stopPropagation(); setEditing(true); }}>{value || <span className="inline-request-empty">Add {editableRequestLabels[field].toLowerCase()}</span>}<span className="inline-edit-mark" aria-hidden="true">✎</span></button>;
+  const save = async () => {
+    if (saving || draft === value) { if (draft === value) setEditing(false); return; }
+    setSaving(true);
+    if (await onSave(draft)) setEditing(false);
+    setSaving(false);
+  };
+  const choices = options.includes(value) || !value ? options : [value, ...options];
+  return <span className="inline-request-editor" onClick={(event) => event.stopPropagation()}>
+    {field === "date" ? <input aria-label={"Edit " + editableRequestLabels[field]} type="date" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void save(); if (event.key === "Escape") setEditing(false); }} />
+      : field === "invoiceNumber" ? <input aria-label={"Edit " + editableRequestLabels[field]} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Invoice number" onKeyDown={(event) => { if (event.key === "Enter") void save(); if (event.key === "Escape") setEditing(false); }} />
+      : <select aria-label={"Edit " + editableRequestLabels[field]} value={draft} onChange={(event) => setDraft(event.target.value)}>{choices.map((choice) => <option key={choice} value={choice}>{choice}</option>)}</select>}
+    <button className="inline-edit-save" type="button" aria-label="Save inline edit" disabled={saving} onClick={() => void save()}>{saving ? "…" : "✓"}</button>
+    <button className="inline-edit-cancel" type="button" aria-label="Cancel inline edit" disabled={saving} onClick={() => setEditing(false)}>×</button>
+  </span>;
+}
+function BulkRequestEditor({ count, companyOptions, payeeOptions, natureOptions, onCancel, onSave }: { count: number; companyOptions: string[]; payeeOptions: string[]; natureOptions: string[]; onCancel: () => void; onSave: (fields: BulkRequestFields, reason: string) => Promise<boolean> }) {
+  const [fields, setFields] = useState<BulkRequestFields>({});
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const definitions: Array<{ field: EditableRequestField; label: string; options?: string[]; type?: "date" }> = [
+    { field: "company", label: "Company", options: companyOptions },
+    { field: "payee", label: "Payee / vendor", options: payeeOptions },
+    { field: "nature", label: "Nature of payment", options: natureOptions },
+    { field: "date", label: "Request date", type: "date" },
+    { field: "invoiceNumber", label: "Invoice number" },
+  ];
+  const setField = (field: EditableRequestField, value?: string) => setFields((current) => {
+    const next = { ...current };
+    if (value === undefined) delete next[field];
+    else next[field] = value;
+    return next;
+  });
+  const submit = async () => {
+    if (!Object.keys(fields).length || !reason.trim() || saving) return;
+    setSaving(true);
+    await onSave(fields, reason.trim());
+    setSaving(false);
+  };
+  return <div className="bulk-edit-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="bulk-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="bulk-edit-title">
+      <header className="bulk-edit-head"><div><span className="eyebrow">Requests</span><h2 id="bulk-edit-title">Bulk edit {count} selected</h2><p>Choose the fields to apply to every selected request. Each change is recorded in the audit trail.</p></div><button type="button" className="icon-button" aria-label="Close bulk editor" onClick={onCancel}>×</button></header>
+      <div className="bulk-edit-fields">{definitions.map(({ field, label, options, type }) => {
+        const enabled = Object.prototype.hasOwnProperty.call(fields, field);
+        const defaultValue = "";
+        return <div className={"bulk-edit-field" + (enabled ? " enabled" : "")} key={field}>
+          <label className="bulk-edit-toggle"><input type="checkbox" checked={enabled} onChange={(event) => setField(field, event.target.checked ? defaultValue : undefined)} /><span>{label}</span></label>
+          {enabled && (type === "date" ? <input type="date" aria-label={"New " + label} value={fields.date ?? ""} onChange={(event) => setField(field, event.target.value)} />
+            : options ? <select aria-label={"New " + label} value={(fields[field] as string | undefined) ?? ""} onChange={(event) => setField(field, event.target.value)}><option value="" disabled>Select {label.toLowerCase()}</option>{options.map((option) => <option key={option} value={option}>{option}</option>)}</select>
+              : <input aria-label={"New " + label} value={fields.invoiceNumber ?? ""} onChange={(event) => setField(field, event.target.value)} placeholder="Enter invoice number (leave blank to clear)" />)}
+        </div>;
+      })}</div>
+      <label className="bulk-edit-reason"><span>Edit reason (required for audit)</span><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why are these requests being changed?" maxLength={500} /></label>
+      <footer className="bulk-edit-actions"><button className="button secondary" type="button" onClick={onCancel} disabled={saving}>Cancel</button><button className="button" type="button" disabled={saving || !Object.keys(fields).length || !reason.trim() || Object.entries(fields).some(([field, value]) => field !== "invoiceNumber" && value === "")} onClick={() => void submit()}>{saving ? "Saving…" : "Apply to " + count + " requests"}</button></footer>
+    </section>
+  </div>;
+}
+function Table({ rows, open, editable = false, selectedIds = [], onToggleSelected, companies = [], payeeOptions = [], natureOptions = [], onEditCell }: { rows: Req[]; open: (x: string) => void; editable?: boolean; selectedIds?: string[]; onToggleSelected?: (id: string) => void; companies?: string[]; payeeOptions?: string[]; natureOptions?: string[]; onEditCell?: (id: string, fields: BulkRequestFields) => Promise<boolean> }) {
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
+            {editable && <th className="request-select-column"><span className="sr-only">Select request</span></th>}
             <th>Request</th>
             <th>Company</th>
             <th>Requester / Payee</th>
@@ -1194,18 +1308,20 @@ function Table({ rows, open }: { rows: Req[]; open: (x: string) => void }) {
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? <tr><td className="empty-requests" colSpan={7}>No AP requests match these filters.</td></tr> : rows.map((r) => (
-            <tr key={r.id} onClick={() => open(r.id)}>
+          {rows.length === 0 ? <tr><td className="empty-requests" colSpan={editable ? 8 : 7}>No AP requests match these filters.</td></tr> : rows.map((r) => (
+            <tr key={r.id} className={editable && selectedIds.includes(r.id) ? "request-row-selected" : undefined} onClick={() => open(r.id)}>
+              {editable && <td className="request-select-column"><input type="checkbox" checked={selectedIds.includes(r.id)} aria-label={"Select " + r.number} onClick={(event) => event.stopPropagation()} onChange={() => onToggleSelected?.(r.id)} /></td>}
               <td>
                 <strong>{r.number}</strong>
-                <div className="fine">{r.date}</div>
+                <div className="fine">{editable && onEditCell ? <InlineRequestCell value={r.date.slice(0, 10)} field="date" onSave={(value) => onEditCell(r.id, { date: value })} /> : r.date}</div>
+                {editable && onEditCell && <div className="fine invoice-inline">Invoice: <InlineRequestCell value={r.invoiceNumber ?? ""} field="invoiceNumber" onSave={(value) => onEditCell(r.id, { invoiceNumber: value })} /></div>}
               </td>
-              <td>{r.company}</td>
+              <td>{editable && onEditCell ? <InlineRequestCell value={r.company} field="company" options={companies} onSave={(value) => onEditCell(r.id, { company: value })} /> : r.company}</td>
               <td>
                 {r.requester}
-                <div className="fine">{r.payee}</div>
+                <div className="fine">{editable && onEditCell ? <InlineRequestCell value={r.payee} field="payee" options={payeeOptions} onSave={(value) => onEditCell(r.id, { payee: value })} /> : r.payee}</div>
               </td>
-              <td>{r.nature}</td>
+              <td>{editable && onEditCell ? <InlineRequestCell value={r.nature} field="nature" options={natureOptions} onSave={(value) => onEditCell(r.id, { nature: value })} /> : r.nature}</td>
               <td className="amount-cell">
                 {cash(total(r.lines), r.currency)}
               </td>
