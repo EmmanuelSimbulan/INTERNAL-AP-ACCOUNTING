@@ -26,6 +26,10 @@ const requestSchema = z.object({
   company: z.string().max(300),
   date: z.string().max(40),
   currency: z.string().max(10),
+  fxRate: z.string().regex(/^\d{1,3}(?:,\d{3})*(?:\.\d{1,8})?$/).optional(),
+  fxRateDate: z.string().date().optional(),
+  fxRateSource: z.string().url().refine((value) => new URL(value).hostname === "www.bsp.gov.ph", "FX source must be BSP").optional(),
+  fxRateRetrievedAt: z.string().datetime().optional(),
   nature: z.string().max(500),
   other: z.string().max(500),
   status: z.string().max(100),
@@ -88,6 +92,9 @@ function requestAuditSummary(row: z.infer<typeof requestSchema>) {
     company: row.company,
     payee: row.payee,
     currency: row.currency,
+    fxRate: row.fxRate ?? null,
+    fxRateDate: row.fxRateDate ?? null,
+    fxRateSource: row.fxRateSource ?? null,
     nature: row.nature,
     invoiceNumber: row.invoiceNumber ?? null,
     total: row.lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0),
@@ -140,6 +147,9 @@ export async function PUT(request: Request) {
         const baselineRows = new Map(rowsById);
         for (const row of parsed.data.rows) {
           const previous = baselineRows.get(row.id);
+          if (row.currency === "USD" && (!previous || previous.currency !== "USD") && (!row.fxRate || !row.fxRateDate || !row.fxRateSource || !row.fxRateRetrievedAt)) {
+            throw new Error(`USD_RATE_REQUIRED:${row.number}`);
+          }
           const priorPairCounts = new Map<string, number>();
           for (const line of previous?.lines ?? []) {
             const key = JSON.stringify([line.project, line.account]);
@@ -208,6 +218,9 @@ export async function PUT(request: Request) {
       if (error instanceof Error && error.message.startsWith("INVALID_ACCOUNT_PROJECT:")) {
         const details = JSON.parse(error.message.slice("INVALID_ACCOUNT_PROJECT:".length)) as { lineNumber: number; account: string; project: string };
         return NextResponse.json({ error: `${details.account} is not configured for Project Code ${details.project} (line ${details.lineNumber}).` }, { status: 400 });
+      }
+      if (error instanceof Error && error.message.startsWith("USD_RATE_REQUIRED:")) {
+        return NextResponse.json({ error: "A current BSP USD/PHP conversion rate and effective date are required for new USD requests." }, { status: 400 });
       }
       const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
       if (code !== "P2034" || attempt === 2) throw error;

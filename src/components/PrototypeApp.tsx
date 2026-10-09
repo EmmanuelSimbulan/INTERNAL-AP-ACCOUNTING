@@ -62,6 +62,10 @@ type Req = {
   company: string;
   date: string;
   currency: string;
+  fxRate?: string;
+  fxRateDate?: string;
+  fxRateSource?: string;
+  fxRateRetrievedAt?: string;
   nature: string;
   other: string;
   status: Status;
@@ -77,6 +81,13 @@ type Req = {
   requireApValidation?: boolean;
   statusHistory?: StatusCheckpoint[];
 };
+type FxQuote = { rate: string; effectiveDate: string; source: string; retrievedAt: string };
+async function fetchBspUsdPhpRate(): Promise<FxQuote> {
+  const response = await fetch("/api/prototype/fx/usd-php", { cache: "no-store" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error ?? "Could not retrieve the BSP exchange rate.");
+  return result as FxQuote;
+}
 type RequestSort = "newest" | "oldest" | "company-asc" | "company-desc";
 type BulkRequestFields = Partial<Pick<Req, "company" | "payee" | "nature" | "date" | "invoiceNumber">>;
 const requestSortOptions: Array<{ value: RequestSort; label: string }> = [
@@ -1378,6 +1389,9 @@ function NewRequest({
     [nature, setNature] = useState(natureOptions[0] ?? ""),
     [other] = useState(""),
     [currency, setCurrency] = useState("PHP"),
+    [fxQuote, setFxQuote] = useState<FxQuote | null>(null),
+    [fxLoading, setFxLoading] = useState(false),
+    [fxError, setFxError] = useState(""),
     [docs, setDocs] = useState<Attachment[]>([]),
     [isDraggingDocuments, setIsDraggingDocuments] = useState(false),
     [documentError, setDocumentError] = useState(""),
@@ -1394,6 +1408,23 @@ function NewRequest({
     ]);
   const applicablePayees = payeeOptions.filter((option) => isVendorCurrencyAllowed(option, currency, vendorCurrencies));
   const numberingRule = getCompanyNumberingRule(company);
+  useEffect(() => {
+    let active = true;
+    if (currency !== "USD") {
+      setFxQuote(null);
+      setFxError("");
+      setFxLoading(false);
+      return () => { active = false; };
+    }
+    setFxLoading(true);
+    setFxError("");
+    void fetchBspUsdPhpRate().then((quote) => {
+      if (active) setFxQuote(quote);
+    }).catch((error) => {
+      if (active) { setFxQuote(null); setFxError(error instanceof Error ? error.message : "Could not retrieve the BSP exchange rate."); }
+    }).finally(() => { if (active) setFxLoading(false); });
+    return () => { active = false; };
+  }, [currency]);
   useEffect(() => {
     let active = true;
     const refresh = async () => {
@@ -1458,9 +1489,12 @@ function NewRequest({
       setDocs((current) => [...current, ...attachments]);
     },
     done = async (submit: boolean) => {
-      const errors = submit
-        ? [...getPrototypeRequestErrors(payee, nature, lines), ...lines.flatMap((line) => line.account && !accountIsApplicable(line.project, line.account, accountProjectCodes) ? [`${line.account} is not configured for ${line.project}.`] : []), ...(!isVendorCurrencyAllowed(payee, currency, vendorCurrencies) ? ["Choose a vendor available for the selected currency."] : [])]
-        : [];
+      const errors = [
+        ...(submit ? getPrototypeRequestErrors(payee, nature, lines) : []),
+        ...(submit ? lines.flatMap((line) => line.account && !accountIsApplicable(line.project, line.account, accountProjectCodes) ? [`${line.account} is not configured for ${line.project}.`] : []) : []),
+        ...(payee && !isVendorCurrencyAllowed(payee, currency, vendorCurrencies) ? ["Choose a vendor available for the selected currency."] : []),
+        ...(currency === "USD" && !fxQuote ? [fxError || (fxLoading ? "Wait for the official BSP exchange rate to load." : "The BSP exchange rate is required for USD requests.")] : []),
+      ];
       setValidationErrors(errors);
       if (errors.length) {
         return;
@@ -1487,6 +1521,7 @@ function NewRequest({
         company,
         date: requestDate,
         currency,
+        ...(currency === "USD" && fxQuote ? { fxRate: fxQuote.rate, fxRateDate: fxQuote.effectiveDate, fxRateSource: fxQuote.source, fxRateRetrievedAt: fxQuote.retrievedAt } : {}),
         nature,
         other,
         status: submit ? approval.status : "Draft",
@@ -1640,6 +1675,16 @@ function NewRequest({
           <span>TOTAL AMOUNT</span>
           <span>{cash(total(lines), currency)}</span>
         </div>
+        {currency === "USD" && <div className="grid grid-2 fx-rate-card" aria-live="polite">
+          <Field label="BSP USD → PHP CONVERSION RATE">
+            <input readOnly value={fxLoading ? "Loading official BSP rate…" : fxQuote ? `₱${fxQuote.rate} per USD` : "Unavailable"} />
+          </Field>
+          <Field label="BSP RATE EFFECTIVE DATE">
+            <input readOnly value={fxQuote?.effectiveDate ?? "—"} />
+          </Field>
+          {fxQuote && <p className="muted">Official BSP daily USD/PHP rate. PHP equivalent: {cash(total(lines) * Number(fxQuote.rate), "PHP")} · Retrieved {new Date(fxQuote.retrievedAt).toLocaleString()}.</p>}
+          {fxError && <p className="document-error" role="alert">{fxError}</p>}
+        </div>}
         <section className="nature-section"><div><span className="eyebrow">Payment classification</span><h2>NATURE OF PAYMENT</h2><p className="muted">Choose the category that best describes this request.</p></div><NaturePicker value={nature} options={natureOptions} onChange={setNature}/></section>
         <section className="supporting-documents" aria-labelledby="supporting-documents-title">
           <div className="supporting-documents-heading">
@@ -1808,7 +1853,7 @@ function Details({
     }));
     setDraft((current) => ({ ...current, documents: [...current.documents, ...additions] }));
   };
-  const saveEdits = (resubmit: boolean) => {
+  const saveEdits = async (resubmit: boolean) => {
     const validationErrors = getPrototypeRequestErrors(draft.payee, draft.nature, draft.lines);
     if (validationErrors.length) { notify(validationErrors[0]); return; }
     const invalidChangedLine = draft.lines.find((line) => line.account && !accountIsApplicable(line.project, line.account, accountProjectCodes) && !request.lines.some((original) => original.project === line.project && original.account === line.account));
@@ -1817,7 +1862,21 @@ function Details({
     if (operationalEditor && !editReason.trim()) { notify("Enter an edit reason for the audit timeline"); return; }
     const event = requesterRevision ? (resubmit ? "Requester revised fields and resubmitted" : "Requester saved revised draft") : `${role} edited request data · ${editReason.trim()}`;
     const approval = resolvePrototypeApproval(draft.nature, total(draft.lines), workflows);
-    update(request.id, { ...draft, ...(requesterRevision && resubmit ? { status: approval.status, approvalPlan: approval.approvalPlan, approvalStep: 0, requireApValidation: approval.requireApValidation } : { status: request.status }) }, event);
+    let fxFields: Pick<Req, "fxRate" | "fxRateDate" | "fxRateSource" | "fxRateRetrievedAt"> = {};
+    if (draft.currency === "USD") {
+      if (request.currency === "USD" && request.fxRate && request.fxRateDate && request.fxRateSource) {
+        fxFields = { fxRate: request.fxRate, fxRateDate: request.fxRateDate, fxRateSource: request.fxRateSource, fxRateRetrievedAt: request.fxRateRetrievedAt };
+      } else {
+        try {
+          const quote = await fetchBspUsdPhpRate();
+          fxFields = { fxRate: quote.rate, fxRateDate: quote.effectiveDate, fxRateSource: quote.source, fxRateRetrievedAt: quote.retrievedAt };
+        } catch (error) {
+          notify(error instanceof Error ? error.message : "Could not retrieve the BSP exchange rate.");
+          return;
+        }
+      }
+    }
+    update(request.id, { ...draft, ...fxFields, ...(requesterRevision && resubmit ? { status: approval.status, approvalPlan: approval.approvalPlan, approvalStep: 0, requireApValidation: approval.requireApValidation } : { status: request.status }) }, event);
     setEditing(false);
     notify(resubmit ? "Revision submitted" : "Changes saved and audited");
   };
@@ -1891,7 +1950,7 @@ function Details({
       </div>
       {editing && <section className="paper request-editor">
         <div className="form-head"><div><span className="eyebrow">{requesterRevision ? "Revision workspace" : "Controlled AP edit"}</span><h2>{requesterRevision ? "Revise returned request" : "Edit request data and descriptions"}</h2><p className="muted">Every saved change is recorded in the immutable timeline.</p></div><button className="icon-button" aria-label="Close editor" onClick={() => setEditing(false)}>×</button></div>
-        <div className="grid grid-2"><Field label="PAYEE"><select value={draft.payee} onChange={(event) => setDraft((current) => ({ ...current, payee: event.target.value }))}><option value="">Select a payee</option>{applicablePayees.map((option) => <option key={option} value={option}>{option}</option>)}</select></Field><Field label="CURRENCY"><select value={draft.currency} onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value, payee: isVendorCurrencyAllowed(current.payee, event.target.value, vendorCurrencies) ? current.payee : "" }))}><option>PHP</option><option>USD</option></select></Field></div><div className="section"><Field label="NATURE OF PAYMENT"><NaturePicker value={draft.nature} options={natureOptions} onChange={(nature) => setDraft((current) => ({ ...current, nature, other: "" }))}/></Field></div>
+        <div className="grid grid-2"><Field label="PAYEE"><select value={draft.payee} onChange={(event) => setDraft((current) => ({ ...current, payee: event.target.value }))}><option value="">Select a payee</option>{applicablePayees.map((option) => <option key={option} value={option}>{option}</option>)}</select></Field><Field label="CURRENCY"><select value={draft.currency} onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value, payee: isVendorCurrencyAllowed(current.payee, event.target.value, vendorCurrencies) ? current.payee : "" }))}><option>PHP</option><option>USD</option></select></Field></div>{draft.currency === "USD" && <p className="muted">The BSP conversion rate is read-only and will be saved with this request when you save.</p>}<div className="section"><Field label="NATURE OF PAYMENT"><NaturePicker value={draft.nature} options={natureOptions} onChange={(nature) => setDraft((current) => ({ ...current, nature, other: "" }))}/></Field></div>
         <h2 className="section">Request line items</h2>
         {draft.lines.map((line, index) => <div className="line-grid" key={index}><Field label="PROJECT CODE"><select value={line.project} onChange={(event) => changeDraftLine(index, "project", event.target.value)}>{projectCodes.map((project) => <option key={project}>{project}</option>)}</select></Field><Field label="ACCOUNT"><select value={line.account} onChange={(event) => changeDraftLine(index, "account", event.target.value)}><option value="">Accounting to complete</option>{!accountIsApplicable(line.project, line.account, accountProjectCodes) && line.account && <option value={line.account}>{line.account} (historical selection)</option>}{getApplicableAccounts(line.project, accountOptions, accountProjectCodes).map((account) => <option key={account}>{account}</option>)}</select></Field><Field label="PARTICULARS / DESCRIPTION"><textarea value={line.particulars} onChange={(event) => changeDraftLine(index, "particulars", event.target.value)}/></Field><Field label="AMOUNT"><input inputMode="decimal" value={line.amount} onChange={(event) => changeDraftLine(index, "amount", event.target.value)}/></Field><button className="button secondary" disabled={draft.lines.length === 1} onClick={() => setDraft((current) => ({ ...current, lines: current.lines.filter((_, lineIndex) => lineIndex !== index) }))}>×</button></div>)}
         <div className="editor-toolbar"><button className="button secondary" onClick={() => setDraft((current) => ({ ...current, lines: [...current.lines, { project: projectCodes[0] ?? "", account: "", particulars: "", amount: "" }] }))}>+ Add line</button><strong>Total: {cash(total(draft.lines), draft.currency)}</strong></div>
@@ -1911,6 +1970,7 @@ function Details({
             <dd>
               {request.date} · {request.currency}
             </dd>
+            {request.currency === "USD" && <><dt>BSP USD → PHP RATE</dt><dd>{request.fxRate && request.fxRateDate ? `₱${request.fxRate} per USD · effective ${request.fxRateDate}` : "No BSP rate snapshot recorded for this legacy request"}</dd>{request.fxRate && <><dt>PHP EQUIVALENT</dt><dd>{cash(total(request.lines) * Number(request.fxRate), "PHP")}</dd><dt>RATE SOURCE</dt><dd><a href={request.fxRateSource ?? "https://www.bsp.gov.ph/statistics/external/day99_data.aspx"} target="_blank" rel="noreferrer">Bangko Sentral ng Pilipinas daily USD/PHP rate</a></dd></>}</>}
             <dt>INVOICE NUMBER</dt>
             <dd>
               {request.invoiceNumber ??

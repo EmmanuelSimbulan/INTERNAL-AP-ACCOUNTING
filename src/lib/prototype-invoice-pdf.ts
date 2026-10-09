@@ -16,6 +16,9 @@ export type InvoiceRequest = {
   company: string;
   date: string;
   currency: string;
+  fxRate?: string;
+  fxRateDate?: string;
+  fxRateSource?: string;
   nature: string;
   other: string;
   status: string;
@@ -428,6 +431,16 @@ export async function buildInvoicePdf(request: InvoiceRequest) {
     font: regular,
     color: secondary,
   });
+  if (request.currency === "USD" && request.fxRate && request.fxRateDate) {
+    const phpTotal = request.lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0) * Number(request.fxRate);
+    page.drawText(`BSP rate: PHP ${safe(request.fxRate)} per USD (effective ${safe(request.fxRateDate)}) - PHP equivalent: ${phpTotal.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, {
+      x: MARGIN,
+      y: 490,
+      size: 7.5,
+      font: regular,
+      color: secondary,
+    });
+  }
 
   let y = drawColumnHeaders(page, bold, 477);
   const particularsWidth = 252;
