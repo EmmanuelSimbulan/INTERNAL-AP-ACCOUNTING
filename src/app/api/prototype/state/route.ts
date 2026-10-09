@@ -94,8 +94,8 @@ function databaseUnavailable(error: unknown) {
   return NextResponse.json({
     code: quotaExceeded ? "DATABASE_QUOTA_EXCEEDED" : "DATABASE_UNAVAILABLE",
     error: quotaExceeded
-      ? "The shared Neon database has reached its plan quota. Saved data is intact. The Neon project owner must restore quota or upgrade the plan; resetting the database will not resolve a quota limit."
-      : "The shared database cannot currently be reached. Saved data has not changed. Ask the Neon project owner to check quota and compute status, then retry; resetting the database will not fix a connection issue.",
+      ? "Neon reports that an account or project quota is exceeded. Saved data is intact. Ask the Neon project owner to check which quota is exhausted and restore access or upgrade. Do not reset UAT data unless storage is confirmed as the issue; resetting will not clear compute or account quotas."
+      : "The shared database cannot currently be reached. Saved data has not changed. Ask the Neon project owner to check quota and compute status, then retry. Avoid resetting UAT data until the cause is confirmed.",
   }, { status: 503, headers: { "Cache-Control": "no-store" } });
 }
 
